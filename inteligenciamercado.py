@@ -11,33 +11,35 @@ st.set_page_config(page_title="Relatório de Estoque", layout="wide")
 st.title("📊 Gerador de Relatório de Estoque Imobiliário")
 st.write("Faça o upload da planilha (.xlsx) ou arquivo PDF (.pdf) de estoque para gerar o relatório formatado.")
 
-def categorizar_vaga(row):
-    moto = row.get('Moto', 0) if 'Moto' in row else 0
-    carro = row.get('Carro', 0) if 'Carro' in row else 0
-    try:
-        moto = float(moto)
-    except:
-        moto = 0
-    try:
-        carro = float(carro)
-    except:
-        carro = 0
-
-    if moto > 0:
-        return 'Vaga Moto'
-    elif carro > 0:
-        return 'Vaga Carro'
-    else:
-        return 'Sem Vaga'
-
 def mapear_tipologia(t):
     t_str = str(t).strip().upper()
-    if '2 Q S' in t_str or '2QS' in t_str: return '2 Q S'
-    elif '2 Q' in t_str or '2Q' in t_str: return '2 Q'
+    if any(term in t_str for term in ['SUITE', 'SUÍTE', '2QS', '2 Q S', '2Q S', '2 QTS S', '2 DORM S', '2D S']):
+        return '2 Q S'
+    elif any(term in t_str for term in ['2Q', '2 Q', '2QTS', '2 QTS', '2 DORM', '2D']):
+        return '2 Q'
     return 'OUTRO'
 
+def categorizar_vaga(row):
+    moto_val = str(row.get('Moto', '')).strip().upper()
+    carro_val = str(row.get('Carro', '')).strip().upper()
+    vaga_gen = str(row.get('Vaga', '')).strip().upper()
+    
+    if moto_val in ['1', 'SIM', 'S', 'MOTO', 'TRUE', '1.0'] or 'MOTO' in vaga_gen:
+        return 'Vaga Moto'
+    elif carro_val in ['1', 'SIM', 'S', 'CARRO', 'TRUE', '1.0'] or 'CARRO' in vaga_gen:
+        return 'Vaga Carro'
+    
+    try:
+        if float(moto_val) > 0: return 'Vaga Moto'
+    except: pass
+    
+    try:
+        if float(carro_val) > 0: return 'Vaga Carro'
+    except: pass
+
+    return 'Sem Vaga'
+
 def obter_coluna_flexivel(df, nomes_possiveis, valor_padrao=''):
-    """Procura uma coluna no DataFrame ignorando maiúsculas/minúsculas e espaços."""
     colunas_df = {str(c).strip().lower(): c for c in df.columns}
     for nome in nomes_possiveis:
         nome_clean = nome.strip().lower()
@@ -52,7 +54,15 @@ def extrair_tabelas_pdf(file_bytes):
             tabelas = page.extract_tables()
             for tabela in tabelas:
                 if tabela and len(tabela) > 1:
-                    header = [str(c).strip().replace('\n', ' ') if c is not None else '' for c in tabela[0]]
+                    # Encontra a linha que provavelmente é o cabeçalho
+                    header_idx = 0
+                    for i, row in enumerate(tabela[:3]):
+                        row_str = " ".join([str(c) for c in row if c]).lower()
+                        if any(k in row_str for k in ['bloco', 'torre', 'apto', 'tipologia', 'unidade', 'valor']):
+                            header_idx = i
+                            break
+                            
+                    header = [str(c).strip().replace('\n', ' ') if c is not None else '' for c in tabela[header_idx]]
                     
                     seen = {}
                     header_unico = []
@@ -64,8 +74,10 @@ def extrair_tabelas_pdf(file_bytes):
                             seen[h] = 0
                             header_unico.append(h if h else "col_0")
                             
-                    df_tabela = pd.DataFrame(tabela[1:], columns=header_unico)
-                    todas_tabelas.append(df_tabela)
+                    dados = tabela[header_idx + 1:]
+                    if dados:
+                        df_tabela = pd.DataFrame(dados, columns=header_unico)
+                        todas_tabelas.append(df_tabela)
                     
     if todas_tabelas:
         df_concat = pd.concat(todas_tabelas, ignore_index=True)
@@ -87,35 +99,41 @@ if uploaded_file is not None:
     if df.empty:
         st.error("Não foi possível extrair dados do arquivo enviado.")
     else:
-        col_emp = obter_coluna_flexivel(df, ['Empreendimento', 'Empreend', 'Nome do Empreendimento'], None)
-        if col_emp.dropna().any():
-            empreendimentos = col_emp.dropna().unique().tolist()
-            emp_selecionado = st.selectbox("Selecione o Empreendimento:", empreendimentos)
-            df_filtrado = df[col_emp == emp_selecionado].copy()
+        st.subheader("📋 Prévia dos Dados Extraídos:")
+        st.dataframe(df.head(10), use_container_width=True)
+        
+        col_emp = obter_coluna_flexivel(df, ['Empreendimento', 'Empreend', 'Nome do Empreendimento', 'Projeto'], None)
+        if col_emp.dropna().any() and str(col_emp.iloc[0]).strip() != '':
+            empreendimentos = [e for e in col_emp.dropna().unique().tolist() if str(e).strip() != '']
+            if empreendimentos:
+                emp_selecionado = st.selectbox("Selecione o Empreendimento:", empreendimentos)
+                df_filtrado = df[col_emp == emp_selecionado].copy()
+            else:
+                emp_selecionado = "Empreendimento Geral"
+                df_filtrado = df.copy()
         else:
-            emp_selecionado = "Empreendimento"
+            emp_selecionado = "Empreendimento Geral"
             df_filtrado = df.copy()
             
-        if st.button("Gerar Relatório"):
+        if st.button("Gerar Relatório Excel"):
             with st.spinner("Processando dados e formatando Excel..."):
-                tipologia_series = obter_coluna_flexivel(df_filtrado, ['Tipologia', 'Tipo', 'Descrição', 'Descricao'], '')
+                tipologia_series = obter_coluna_flexivel(df_filtrado, ['Tipologia', 'Tipo', 'Descrição', 'Descricao', 'Planta'], '')
                 df_filtrado['Tipologia_clean'] = tipologia_series.astype(str).apply(mapear_tipologia)
 
                 carro_series = obter_coluna_flexivel(df_filtrado, ['Carro', 'Vaga Carro', 'Vagas Carro'], 0)
                 moto_series = obter_coluna_flexivel(df_filtrado, ['Moto', 'Vaga Moto', 'Vagas Moto'], 0)
                 
-                df_filtrado['Carro'] = pd.to_numeric(carro_series, errors='coerce').fillna(0)
-                df_filtrado['Moto'] = pd.to_numeric(moto_series, errors='coerce').fillna(0)
-                
+                df_filtrado['Moto'] = moto_series
+                df_filtrado['Carro'] = carro_series
                 df_filtrado['Categoria Vaga'] = df_filtrado.apply(categorizar_vaga, axis=1)
 
-                area_int = pd.to_numeric(obter_coluna_flexivel(df_filtrado, ['Área interna', 'Area interna', 'Área Privativa', 'Area Privativa'], 0), errors='coerce').fillna(0)
+                area_int = pd.to_numeric(obter_coluna_flexivel(df_filtrado, ['Área interna', 'Area interna', 'Área Privativa', 'Area Privativa', 'Área Total', 'Area Total'], 0), errors='coerce').fillna(0)
                 quintal = pd.to_numeric(obter_coluna_flexivel(df_filtrado, ['Quintal'], 0), errors='coerce').fillna(0)
                 varanda = pd.to_numeric(obter_coluna_flexivel(df_filtrado, ['Varanda'], 0), errors='coerce').fillna(0)
                 
-                df_filtrado['Área Total'] = area_int + quintal + varanda
+                df_filtrado['Área Total Calculada'] = area_int + quintal + varanda
 
-                val_imovel = pd.to_numeric(obter_coluna_flexivel(df_filtrado, ['Valor do Imóvel', 'Valor Imovel', 'Valor da Unidade', 'Valor'], 0), errors='coerce').fillna(0)
+                val_imovel = pd.to_numeric(obter_coluna_flexivel(df_filtrado, ['Valor do Imóvel', 'Valor Imovel', 'Valor da Unidade', 'Valor', 'Preço'], 0), errors='coerce').fillna(0)
                 val_avaliacao = pd.to_numeric(obter_coluna_flexivel(df_filtrado, ['Valor da Avaliação', 'Valor Avaliacao', 'Avaliação', 'Avaliacao'], 0), errors='coerce').fillna(0)
                 
                 df_filtrado['Valor do Imóvel'] = val_imovel
@@ -134,7 +152,8 @@ if uploaded_file is not None:
                     ('Sem Vaga 2QS', 'Sem Vaga', '2 Q S'),
                     ('Moto 2Q', 'Vaga Moto', '2 Q'),
                     ('Carro 2Q', 'Vaga Carro', '2 Q'),
-                    ('Sem Vaga 2Q', 'Sem Vaga', '2 Q')
+                    ('Sem Vaga 2Q', 'Sem Vaga', '2 Q'),
+                    ('Outras Tipologias', 'TODAS', 'OUTRO')
                 ]
 
                 fill_title = PatternFill(start_color='1B365D', end_color='1B365D', fill_type='solid')
@@ -142,7 +161,11 @@ if uploaded_file is not None:
 
                 for sheet_name, cat_key, tipo_key in configuracoes:
                     ws = wb.create_sheet(title=sheet_name)
-                    sub_df = df_filtrado[(df_filtrado['Categoria Vaga'] == cat_key) & (df_filtrado['Tipologia_clean'] == tipo_key)]
+                    
+                    if cat_key == 'TODAS':
+                        sub_df = df_filtrado[df_filtrado['Tipologia_clean'] == tipo_key]
+                    else:
+                        sub_df = df_filtrado[(df_filtrado['Categoria Vaga'] == cat_key) & (df_filtrado['Tipologia_clean'] == tipo_key)]
                     
                     ws.merge_cells('A1:F1')
                     ws['A1'] = f"{emp_selecionado} — {cat_key.upper()} ({tipo_key})"
@@ -150,7 +173,7 @@ if uploaded_file is not None:
                     ws['A1'].fill = fill_title
                     ws['A1'].alignment = Alignment(horizontal='center', vertical='center')
                     
-                    headers = ['Bloco/Torre', 'Apto', 'Tipologia', 'Área Total', 'Valor Imóvel', 'Valor Avaliação']
+                    headers = ['Bloco/Torre', 'Apto', 'Tipologia Original', 'Área Total', 'Valor Imóvel', 'Valor Avaliação']
                     ws.append([])
                     ws.append(headers)
                     
@@ -159,7 +182,7 @@ if uploaded_file is not None:
                             str(bloco_series.loc[idx] if idx in bloco_series.index else '-'),
                             str(apto_series.loc[idx] if idx in apto_series.index else '-'),
                             str(tipologia_series.loc[idx] if idx in tipologia_series.index else '-'),
-                            round(row.get('Área Total', 0), 2),
+                            round(row.get('Área Total Calculada', 0), 2),
                             round(row.get('Valor do Imóvel', 0), 2),
                             round(row.get('Valor da Avaliação', 0), 2)
                         ])
@@ -175,4 +198,3 @@ if uploaded_file is not None:
                     file_name=f"Relatorio_Estoque_{str(emp_selecionado).replace(' ', '_')}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
-                
