@@ -29,8 +29,23 @@ def extrair_tabelas_pdf(file_bytes):
             tabelas = page.extract_tables()
             for tabela in tabelas:
                 if tabela and len(tabela) > 1:
-                    df_tabela = pd.DataFrame(tabela[1:], columns=tabela[0])
+                    # Trata e limpa os cabeçalhos das colunas
+                    header = [str(c).strip() if c is not None else '' for c in tabela[0]]
+                    
+                    # Garante nomes de colunas únicos (evita InvalidIndexError)
+                    seen = {}
+                    header_unico = []
+                    for h in header:
+                        if h in seen:
+                            seen[h] += 1
+                            header_unico.append(f"{h}_{seen[h]}" if h else f"col_{seen[h]}")
+                        else:
+                            seen[h] = 0
+                            header_unico.append(h if h else "col_0")
+                            
+                    df_tabela = pd.DataFrame(tabela[1:], columns=header_unico)
                     todas_tabelas.append(df_tabela)
+                    
     if todas_tabelas:
         return pd.concat(todas_tabelas, ignore_index=True)
     return pd.DataFrame()
@@ -117,6 +132,7 @@ if uploaded_file is not None:
                 st.download_button(
                     label="📥 Baixar Relatório Excel",
                     data=processed_data,
-                    file_name=f"Relatorio_Estoque_{emp_selecionado.replace(' ', '_')}.xlsx",
+                    file_name=f"Relatorio_Estoque_{str(emp_selecionado).replace(' ', '_')}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
+                
