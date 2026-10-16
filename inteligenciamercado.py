@@ -5,11 +5,35 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 import io
 import pdfplumber
+import re
 
 st.set_page_config(page_title="Relatório de Estoque", layout="wide")
 
 st.title("📊 Gerador de Relatório de Estoque Imobiliário")
 st.write("Faça o upload da planilha (.xlsx) ou arquivo PDF (.pdf) de estoque para gerar o relatório formatado.")
+
+def converter_numero_br(val):
+    if pd.isna(val) or val is None:
+        return 0.0
+    s = str(val).strip().replace('R$', '').replace('$', '').replace(' ', '')
+    if not s or s.lower() in ['nan', 'none', 'null', '<na>', '-']:
+        return 0.0
+    if ',' in s and '.' in s:
+        s = s.replace('.', '').replace(',', '.')
+    elif ',' in s:
+        s = s.replace(',', '.')
+    try:
+        return float(re.sub(r'[^0-9.]', '', s))
+    except:
+        return 0.0
+
+def limpar_texto(val, padrao='-'):
+    if pd.isna(val) or val is None:
+        return padrao
+    s = str(val).strip()
+    if not s or s.lower() in ['nan', 'none', 'null', '<na>']:
+        return padrao
+    return s
 
 def mapear_tipologia(t):
     t_str = str(t).strip().upper()
@@ -17,78 +41,75 @@ def mapear_tipologia(t):
         return '2 Q S'
     elif any(term in t_str for term in ['2Q', '2 Q', '2QTS', '2 QTS', '2 DORM', '2D', '2 QUARTOS']):
         return '2 Q'
-    return 'OUTRAS TIPOLOGIAS'
+    return 'OUTRA TIPOLOGIA'
 
-def categorizar_vaga(row):
-    moto_val = str(row.get('Moto', '')).strip().upper()
-    carro_val = str(row.get('Carro', '')).strip().upper()
-    vaga_gen = str(row.get('Vaga', '')).strip().upper() + " " + str(row.get('Vagas', '')).strip().upper()
+def categorizar_vaga(row, col_moto='', col_carro='', col_vaga=''):
+    moto_val = str(row.get(col_moto, '')).strip().upper() if col_moto else ''
+    carro_val = str(row.get(col_carro, '')).strip().upper() if col_carro else ''
+    vaga_gen = str(row.get(col_vaga, '')).strip().upper() if col_vaga else ''
     
     if moto_val in ['1', 'SIM', 'S', 'MOTO', 'TRUE', '1.0'] or 'MOTO' in vaga_gen:
         return 'Vaga Moto'
     elif carro_val in ['1', 'SIM', 'S', 'CARRO', 'TRUE', '1.0'] or 'CARRO' in vaga_gen or any(c in vaga_gen for c in ['1', '2', '3', 'SIM', 'S']):
         return 'Vaga Carro'
     
-    try:
-        if float(moto_val) > 0: return 'Vaga Moto'
-    except: pass
-    
-    try:
-        if float(carro_val) > 0: return 'Vaga Carro'
-    except: pass
+    if converter_numero_br(moto_val) > 0: return 'Vaga Moto'
+    if converter_numero_br(carro_val) > 0: return 'Vaga Carro'
 
     return 'Sem Vaga'
 
-def obter_coluna_flexivel(df, nomes_possiveis, valor_padrao=''):
-    colunas_df = {str(c).strip().lower(): c for c in df.columns}
-    # Busca exata
-    for nome in nomes_possiveis:
-        nome_clean = nome.strip().lower()
-        if nome_clean in colunas_df:
-            return df[colunas_df[nome_clean]]
-    # Busca parcial se não encontrar exata
-    for col_clean, col_orig in colunas_df.items():
-        for nome in nomes_possiveis:
-            if nome.strip().lower() in col_clean:
-                return df[col_orig]
-    return pd.Series([valor_padrao] * len(df), index=df.index)
-
 def extrair_tabelas_pdf(file_bytes):
-    todas_tabelas = []
+    todas_linhas = []
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
         for page in pdf.pages:
             tabelas = page.extract_tables()
             for tabela in tabelas:
-                if tabela and len(tabela) > 1:
-                    header = [str(c).strip().replace('\n', ' ') if c is not None else '' for c in tabela[0]]
-                    seen = {}
-                    header_unico = []
-                    for h in header:
-                        if h in seen:
-                            seen[h] += 1
-                            header_unico.append(f"{h}_{seen[h]}" if h else f"col_{seen[h]}")
-                        else:
-                            seen[h] = 0
-                            header_unico.append(h if h else "col_0")
-                    
-                    df_tab = pd.DataFrame(tabela[1:], columns=header_unico)
-                    todas_tabelas.append(df_tab)
-                    
+                if tabela:
+                    for r in tabela:
+                        if any(r):
+                            todas_linhas.append([str(c).strip().replace('\n', ' ') if c is not None else '' for c in r])
             if not tabelas:
-                texto_linhas = page.extract_text()
-                if texto_linhas:
-                    linhas = [l.split() for l in texto_linhas.split('\n') if l.strip()]
-                    if len(linhas) > 1:
-                        max_cols = max(len(l) for l in linhas)
-                        linhas_pad = [l + [''] * (max_cols - len(l)) for l in linhas]
-                        df_tab = pd.DataFrame(linhas_pad[1:], columns=[f"col_{i}" for i in range(max_cols)])
-                        todas_tabelas.append(df_tab)
+                texto = page.extract_text()
+                if texto:
+                    for line in texto.split('\n'):
+                        parts = line.split()
+                        if len(parts) >= 3:
+                            todas_linhas.append(parts)
+                            
+    if not todas_linhas:
+        return pd.DataFrame()
 
-    if todas_tabelas:
-        df_concat = pd.concat(todas_tabelas, ignore_index=True)
-        df_concat.columns = [str(c).strip().replace('\n', ' ') for c in df_concat.columns]
-        return df_concat
-    return pd.DataFrame()
+    header_idx = 0
+    for idx, row in enumerate(todas_linhas[:10]):
+        row_str = " ".join(row).lower()
+        if any(k in row_str for k in ['bloco', 'torre', 'apto', 'unidade', 'tipologia', 'valor', 'área', 'area', 'vaga']):
+            header_idx = idx
+            break
+            
+    header = todas_linhas[header_idx]
+    seen = {}
+    header_unico = []
+    for h in header:
+        clean_h = h if h else "col"
+        if clean_h in seen:
+            seen[clean_h] += 1
+            header_unico.append(f"{clean_h}_{seen[clean_h]}")
+        else:
+            seen[clean_h] = 0
+            header_unico.append(clean_h)
+            
+    dados = todas_linhas[header_idx + 1:]
+    dados_limpos = []
+    for r in dados:
+        if len(r) == len(header_unico):
+            if " ".join(r).lower() != " ".join(header).lower():
+                dados_limpos.append(r)
+        elif len(r) < len(header_unico):
+            dados_limpos.append(r + [''] * (len(header_unico) - len(r)))
+        else:
+            dados_limpos.append(r[:len(header_unico)])
+            
+    return pd.DataFrame(dados_limpos, columns=header_unico)
 
 uploaded_file = st.file_uploader("Arraste sua planilha (.xlsx) ou arquivo (.pdf) aqui", type=["xlsx", "pdf"])
 
@@ -104,49 +125,64 @@ if uploaded_file is not None:
     if df.empty:
         st.error("Não foi possível extrair dados do arquivo enviado.")
     else:
-        st.subheader("📋 Dados Extraídos do Arquivo:")
+        st.subheader("📋 Dados Brutos Identificados no Arquivo")
         st.write(f"Total de registros encontrados: **{len(df)} linhas**")
-        st.dataframe(df, use_container_width=True)
+        st.dataframe(df.head(15), use_container_width=True)
+
+        st.subheader("⚙️ Mapeamento de Colunas (Ajuste se necessário)")
+        colunas_disponiveis = ["(Nenhuma / Não existe)"] + list(df.columns)
+
+        def encontrar_melhor_coluna(opcoes, palavras_chave):
+            for col in opcoes[1:]:
+                col_clean = str(col).lower()
+                if any(p in col_clean for p in palavras_chave):
+                    return col
+            return opcoes[0]
+
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            sel_bloco = st.selectbox("Coluna do Bloco/Torre:", colunas_disponiveis, index=colunas_disponiveis.index(encontrar_melhor_coluna(colunas_disponiveis, ['bloco', 'torre', 'tr'])))
+            sel_apto = st.selectbox("Coluna do Apto/Unidade:", colunas_disponiveis, index=colunas_disponiveis.index(encontrar_melhor_coluna(colunas_disponiveis, ['apto', 'unidade', 'ap', 'up'])))
+        with col2:
+            sel_tipo = st.selectbox("Coluna da Tipologia/Planta:", colunas_disponiveis, index=colunas_disponiveis.index(encontrar_melhor_coluna(colunas_disponiveis, ['tipologia', 'tipo', 'planta', 'descricao', 'descrição', 'dorm'])))
+            sel_area = st.selectbox("Coluna da Área Total/Privativa:", colunas_disponiveis, index=colunas_disponiveis.index(encontrar_melhor_coluna(colunas_disponiveis, ['área', 'area', 'm2', 'privativa'])))
+        with col3:
+            sel_valor = st.selectbox("Coluna do Valor do Imóvel:", colunas_disponiveis, index=colunas_disponiveis.index(encontrar_melhor_coluna(colunas_disponiveis, ['valor', 'preço', 'preco', 'venda', 'tabela'])))
+            sel_avaliacao = st.selectbox("Coluna do Valor da Avaliação:", colunas_disponiveis, index=colunas_disponiveis.index(encontrar_melhor_coluna(colunas_disponiveis, ['avaliação', 'avaliacao', 'aval'])))
+
+        st.markdown("---")
         
-        col_emp = obter_coluna_flexivel(df, ['Empreendimento', 'Empreend', 'Nome do Empreendimento', 'Projeto'], None)
-        if col_emp.dropna().any() and str(col_emp.iloc[0]).strip() != '':
-            empreendimentos = [e for e in col_emp.dropna().unique().tolist() if str(e).strip() != '']
-            if empreendimentos:
-                emp_selecionado = st.selectbox("Selecione o Empreendimento:", empreendimentos)
-                df_filtrado = df[col_emp == emp_selecionado].copy()
-            else:
-                emp_selecionado = "Empreendimento Geral"
-                df_filtrado = df.copy()
-        else:
-            emp_selecionado = "Empreendimento Geral"
-            df_filtrado = df.copy()
-            
-        if st.button("Gerar Relatório Excel"):
+        col_vaga1, col_vaga2 = st.columns(2)
+        with col_vaga1:
+            sel_carro = st.selectbox("Coluna Vaga Carro:", colunas_disponiveis, index=colunas_disponiveis.index(encontrar_melhor_coluna(colunas_disponiveis, ['carro'])))
+        with col_vaga2:
+            sel_moto = st.selectbox("Coluna Vaga Moto:", colunas_disponiveis, index=colunas_disponiveis.index(encontrar_melhor_coluna(colunas_disponiveis, ['moto'])))
+
+        if st.button("🚀 Gerar Relatório Formatado em Excel", type="primary"):
             with st.spinner("Processando dados e formatando Excel..."):
-                tipologia_series = obter_coluna_flexivel(df_filtrado, ['Tipologia', 'Tipo', 'Descrição', 'Descricao', 'Planta', 'Dorm'], '')
-                df_filtrado['Tipologia_clean'] = tipologia_series.astype(str).apply(mapear_tipologia)
-
-                carro_series = obter_coluna_flexivel(df_filtrado, ['Carro', 'Vaga Carro', 'Vagas Carro', 'Vaga'], 0)
-                moto_series = obter_coluna_flexivel(df_filtrado, ['Moto', 'Vaga Moto', 'Vagas Moto'], 0)
                 
-                df_filtrado['Moto'] = moto_series
-                df_filtrado['Carro'] = carro_series
-                df_filtrado['Categoria Vaga'] = df_filtrado.apply(categorizar_vaga, axis=1)
-
-                area_int = pd.to_numeric(obter_coluna_flexivel(df_filtrado, ['Área interna', 'Area interna', 'Área Privativa', 'Area Privativa', 'Área Total', 'Area Total', 'Área', 'Area'], 0), errors='coerce').fillna(0)
-                quintal = pd.to_numeric(obter_coluna_flexivel(df_filtrado, ['Quintal'], 0), errors='coerce').fillna(0)
-                varanda = pd.to_numeric(obter_coluna_flexivel(df_filtrado, ['Varanda'], 0), errors='coerce').fillna(0)
+                s_bloco = df[sel_bloco] if sel_bloco in df.columns else pd.Series(['-']*len(df))
+                s_apto = df[sel_apto] if sel_apto in df.columns else pd.Series(['-']*len(df))
+                s_tipo = df[sel_tipo] if sel_tipo in df.columns else pd.Series(['-']*len(df))
                 
-                df_filtrado['Área Total Calculada'] = area_int + quintal + varanda
+                s_area = df[sel_area] if sel_area in df.columns else pd.Series([0]*len(df))
+                s_valor = df[sel_valor] if sel_valor in df.columns else pd.Series([0]*len(df))
+                s_aval = df[sel_avaliacao] if sel_avaliacao in df.columns else pd.Series([0]*len(df))
 
-                val_imovel = pd.to_numeric(obter_coluna_flexivel(df_filtrado, ['Valor do Imóvel', 'Valor Imovel', 'Valor da Unidade', 'Valor', 'Preço', 'Preco'], 0), errors='coerce').fillna(0)
-                val_avaliacao = pd.to_numeric(obter_coluna_flexivel(df_filtrado, ['Valor da Avaliação', 'Valor Avaliacao', 'Avaliação', 'Avaliacao'], 0), errors='coerce').fillna(0)
+                df_proc = pd.DataFrame()
+                df_proc['Bloco'] = s_bloco.apply(lambda x: limpar_texto(x, '-'))
+                df_proc['Apto'] = s_apto.apply(lambda x: limpar_texto(x, '-'))
+                df_proc['Tipologia_Orig'] = s_tipo.apply(lambda x: limpar_texto(x, '-'))
+                df_proc['Tipologia_Clean'] = df_proc['Tipologia_Orig'].apply(mapear_tipologia)
                 
-                df_filtrado['Valor do Imóvel'] = val_imovel
-                df_filtrado['Valor da Avaliação'] = val_avaliacao
+                df_proc['Área'] = s_area.apply(converter_numero_br)
+                df_proc['Valor_Imovel'] = s_valor.apply(converter_numero_br)
+                df_proc['Valor_Avaliacao'] = s_aval.apply(converter_numero_br)
 
-                bloco_series = obter_coluna_flexivel(df_filtrado, ['Bloco', 'Torre'], '-')
-                apto_series = obter_coluna_flexivel(df_filtrado, ['Apto', 'Unidade', 'Apartamento', 'Número', 'Numero'], '-')
+                col_c_name = sel_carro if sel_carro in df.columns else ''
+                col_m_name = sel_moto if sel_moto in df.columns else ''
+                
+                df_proc['Categoria_Vaga'] = df.apply(lambda r: categorizar_vaga(r, col_moto=col_m_name, col_carro=col_c_name), axis=1)
 
                 output = io.BytesIO()
                 wb = openpyxl.Workbook()
@@ -154,13 +190,12 @@ if uploaded_file is not None:
 
                 fill_title = PatternFill(start_color='1B365D', end_color='1B365D', fill_type='solid')
                 font_title = Font(name='Calibri', size=14, bold=True, color='FFFFFF')
+                headers = ['Bloco/Torre', 'Apto/Unidade', 'Tipologia Original', 'Área Total (m²)', 'Valor Imóvel (R$)', 'Valor Avaliação (R$)']
 
-                headers = ['Bloco/Torre', 'Apto/Unidade', 'Tipologia Original', 'Área Total', 'Valor Imóvel', 'Valor Avaliação']
-
-                # ABA 1: ESTOQUE GERAL (Exporta todas as linhas sem filtro)
+                # ABA 1: ESTOQUE GERAL
                 ws_geral = wb.create_sheet(title="Estoque Geral")
                 ws_geral.merge_cells('A1:F1')
-                ws_geral['A1'] = f"{emp_selecionado} — TODAS AS UNIDADES"
+                ws_geral['A1'] = "RELATÓRIO DE ESTOQUE — TODAS AS UNIDADES"
                 ws_geral['A1'].font = font_title
                 ws_geral['A1'].fill = fill_title
                 ws_geral['A1'].alignment = Alignment(horizontal='center', vertical='center')
@@ -168,14 +203,14 @@ if uploaded_file is not None:
                 ws_geral.append([])
                 ws_geral.append(headers)
 
-                for idx, row in df_filtrado.iterrows():
+                for _, row in df_proc.iterrows():
                     ws_geral.append([
-                        str(bloco_series.loc[idx] if idx in bloco_series.index else '-'),
-                        str(apto_series.loc[idx] if idx in apto_series.index else '-'),
-                        str(tipologia_series.loc[idx] if idx in tipologia_series.index else '-'),
-                        round(row.get('Área Total Calculada', 0), 2),
-                        round(row.get('Valor do Imóvel', 0), 2),
-                        round(row.get('Valor da Avaliação', 0), 2)
+                        row['Bloco'],
+                        row['Apto'],
+                        row['Tipologia_Orig'],
+                        row['Área'],
+                        row['Valor_Imovel'],
+                        row['Valor_Avaliacao']
                     ])
 
                 # ABAS CATEGORIZADAS
@@ -186,14 +221,19 @@ if uploaded_file is not None:
                     ('Moto 2Q', 'Vaga Moto', '2 Q'),
                     ('Carro 2Q', 'Vaga Carro', '2 Q'),
                     ('Sem Vaga 2Q', 'Sem Vaga', '2 Q'),
+                    ('Outras Unidades', 'TODAS', 'OUTRA TIPOLOGIA')
                 ]
 
                 for sheet_name, cat_key, tipo_key in configuracoes:
                     ws = wb.create_sheet(title=sheet_name)
-                    sub_df = df_filtrado[(df_filtrado['Categoria Vaga'] == cat_key) & (df_filtrado['Tipologia_clean'] == tipo_key)]
+                    
+                    if cat_key == 'TODAS':
+                        sub_df = df_proc[df_proc['Tipologia_Clean'] == tipo_key]
+                    else:
+                        sub_df = df_proc[(df_proc['Categoria_Vaga'] == cat_key) & (df_proc['Tipologia_Clean'] == tipo_key)]
                     
                     ws.merge_cells('A1:F1')
-                    ws['A1'] = f"{emp_selecionado} — {cat_key.upper()} ({tipo_key})"
+                    ws['A1'] = f"ESTOQUE — {cat_key.upper()} ({tipo_key})"
                     ws['A1'].font = font_title
                     ws['A1'].fill = fill_title
                     ws['A1'].alignment = Alignment(horizontal='center', vertical='center')
@@ -201,15 +241,27 @@ if uploaded_file is not None:
                     ws.append([])
                     ws.append(headers)
                     
-                    for idx, row in sub_df.iterrows():
+                    for _, row in sub_df.iterrows():
                         ws.append([
-                            str(bloco_series.loc[idx] if idx in bloco_series.index else '-'),
-                            str(apto_series.loc[idx] if idx in apto_series.index else '-'),
-                            str(tipologia_series.loc[idx] if idx in tipologia_series.index else '-'),
-                            round(row.get('Área Total Calculada', 0), 2),
-                            round(row.get('Valor do Imóvel', 0), 2),
-                            round(row.get('Valor da Avaliação', 0), 2)
+                            row['Bloco'],
+                            row['Apto'],
+                            row['Tipologia_Orig'],
+                            row['Área'],
+                            row['Valor_Imovel'],
+                            row['Valor_Avaliacao']
                         ])
+
+                # Formatação de moedas e tamanhos no Excel
+                for sheet in wb.worksheets:
+                    for row in sheet.iter_rows(min_row=4, max_col=6):
+                        if len(row) >= 6:
+                            row[3].number_format = '#,##0.00'
+                            row[4].number_format = 'R$ #,##0.00'
+                            row[5].number_format = 'R$ #,##0.00'
+                    for col in sheet.columns:
+                        max_len = max(len(str(cell.value or '')) for cell in col)
+                        col_letter = get_column_letter(col[0].column)
+                        sheet.column_dimensions[col_letter].width = max(max_len + 3, 14)
 
                 wb.save(output)
                 processed_data = output.getvalue()
@@ -217,9 +269,8 @@ if uploaded_file is not None:
                 st.success("Relatório gerado com sucesso!")
                 
                 st.download_button(
-                    label="📥 Baixar Relatório Excel",
+                    label="📥 Baixar Relatório Excel Formatado",
                     data=processed_data,
-                    file_name=f"Relatorio_Estoque_{str(emp_selecionado).replace(' ', '_')}.xlsx",
+                    file_name="Relatorio_Estoque_Formatado.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-                
+                )     
