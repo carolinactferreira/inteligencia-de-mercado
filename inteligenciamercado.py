@@ -4,13 +4,13 @@ import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 import io
+import pdfplumber
 
 st.set_page_config(page_title="Relatório de Estoque", layout="wide")
 
 st.title("📊 Gerador de Relatório de Estoque Imobiliário")
-st.write("Faça o upload da planilha bruta de estoque para gerar o arquivo formatado automaticamente.")
+st.write("Faça o upload da planilha (.xlsx) ou arquivo PDF (.pdf) de estoque para gerar o relatório formatado.")
 
-# Função para categorizar vagas
 def categorizar_vaga(row):
     if row.get('Moto', 0) > 0: return 'Vaga Moto'
     elif row.get('Carro', 0) > 0: return 'Vaga Carro'
@@ -22,32 +22,53 @@ def mapear_tipologia(t):
     elif '2 Q' in t_str or '2Q' in t_str: return '2 Q'
     return 'OUTRO'
 
-uploaded_file = st.file_uploader("Arraste sua planilha (.xlsx) aqui", type=["xlsx"])
+def extrair_tabelas_pdf(file_bytes):
+    todas_tabelas = []
+    with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+        for page in pdf.pages:
+            tabelas = page.extract_tables()
+            for tabela in tabelas:
+                if tabela and len(tabela) > 1:
+                    df_tabela = pd.DataFrame(tabela[1:], columns=tabela[0])
+                    todas_tabelas.append(df_tabela)
+    if todas_tabelas:
+        return pd.concat(todas_tabelas, ignore_index=True)
+    return pd.DataFrame()
+
+# Aceita tanto .xlsx quanto .pdf
+uploaded_file = st.file_uploader("Arraste sua planilha (.xlsx) ou arquivo (.pdf) aqui", type=["xlsx", "pdf"])
 
 if uploaded_file is not None:
-    df = pd.read_excel(uploaded_file)
+    file_bytes = uploaded_file.read()
     
-    # Identificar empreendimentos disponíveis
-    if 'Empreendimento' in df.columns:
-        empreendimentos = df['Empreendimento'].dropna().unique().tolist()
-        emp_selecionado = st.selectbox("Selecione o Empreendimento:", empreendimentos)
+    if uploaded_file.name.endswith('.pdf'):
+        df = extrair_tabelas_pdf(file_bytes)
+    else:
+        df = pd.read_excel(io.BytesIO(file_bytes))
         
+    if df.empty:
+        st.error("Não foi possível extrair dados do arquivo enviado.")
+    else:
+        # Identificar empreendimentos disponíveis
+        if 'Empreendimento' in df.columns:
+            empreendimentos = df['Empreendimento'].dropna().unique().tolist()
+            emp_selecionado = st.selectbox("Selecione o Empreendimento:", empreendimentos)
+        else:
+            emp_selecionado = "Empreendimento"
+            
         if st.button("Gerar Relatório"):
             with st.spinner("Processando dados e formatando Excel..."):
-                # Filtrar dados
-                df_filtrado = df[df['Empreendimento'] == emp_selecionado].copy()
+                df_filtrado = df[df['Empreendimento'] == emp_selecionado].copy() if 'Empreendimento' in df.columns else df.copy()
                 
-                # Limpeza
                 colunas_num = ['Carro', 'Moto', 'Área interna', 'Quintal', 'Varanda', 'Valor do Imóvel', 'Valor da Avaliação']
                 for col in colunas_num:
                     if col in df_filtrado.columns:
-                        df_filtrado[col] = df_filtrado[col].fillna(0)
+                        df_filtrado[col] = pd.to_numeric(df_filtrado[col], errors='coerce').fillna(0)
                         
                 df_filtrado['Área Total'] = df_filtrado.get('Área interna', 0) + df_filtrado.get('Quintal', 0) + df_filtrado.get('Varanda', 0)
                 df_filtrado['Tipologia_clean'] = df_filtrado.get('Tipologia', '').apply(mapear_tipologia)
                 df_filtrado['Categoria Vaga'] = df_filtrado.apply(categorizar_vaga, axis=1)
 
-                # Criar Excel na Memória
                 output = io.BytesIO()
                 wb = openpyxl.Workbook()
                 wb.remove(wb.active)
@@ -61,7 +82,6 @@ if uploaded_file is not None:
                     ('Sem Vaga 2Q', 'Sem Vaga', '2 Q')
                 ]
 
-                # Estilos base
                 fill_title = PatternFill(start_color='1B365D', end_color='1B365D', fill_type='solid')
                 font_title = Font(name='Calibri', size=14, bold=True, color='FFFFFF')
 
@@ -69,28 +89,22 @@ if uploaded_file is not None:
                     ws = wb.create_sheet(title=sheet_name)
                     sub_df = df_filtrado[(df_filtrado['Categoria Vaga'] == cat_key) & (df_filtrado['Tipologia_clean'] == tipo_key)]
                     
-                    # Cabeçalho
-                    ws.merge_cells('A1:I1')
+                    ws.merge_cells('A1:F1')
                     ws['A1'] = f"{emp_selecionado} — {cat_key.upper()} ({tipo_key})"
                     ws['A1'].font = font_title
                     ws['A1'].fill = fill_title
                     ws['A1'].alignment = Alignment(horizontal='center', vertical='center')
                     
-                    # Tabela de Dados Simplificada para o código
                     headers = ['Bloco/Torre', 'Apto', 'Tipologia', 'Área Total', 'Valor Imóvel', 'Valor Avaliação']
-                    ws.append([]) # Linha em branco
+                    ws.append([])
                     ws.append(headers)
-                    
-                    qtd_unidades = len(sub_df)
-                    area_media = sub_df['Área Total'].mean() if qtd_unidades > 0 else 0
-                    val_imovel_med = sub_df['Valor do Imóvel'].mean() if qtd_unidades > 0 else 0
                     
                     for idx, row in sub_df.iterrows():
                         ws.append([
                             str(row.get('Bloco', row.get('Torre', '-'))),
                             str(row.get('Apto', '-')),
-                            str(row['Tipologia']),
-                            round(row['Área Total'], 2),
+                            str(row.get('Tipologia', '-')),
+                            round(row.get('Área Total', 0), 2),
                             round(row.get('Valor do Imóvel', 0), 2),
                             round(row.get('Valor da Avaliação', 0), 2)
                         ])
