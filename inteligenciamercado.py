@@ -38,15 +38,12 @@ def limpar_texto(val, padrao='-'):
 def parse_concatenated_string(text_str):
     s = str(text_str).strip()
     
-    # Extrai número do Apto (ex: APTO 1703 -> 1703)
     apto_match = re.search(r'(?:APTO|APT|UNIDADE|UP|AP)\s*[:\.-]?\s*(\w+)', s, re.IGNORECASE)
     apto = apto_match.group(1) if apto_match else '-'
     
-    # Extrai Tipologia (ex: 1 Q, 2 Q, 2 Q S, 2QS, 2D)
     tipo_match = re.search(r'\b(\d\s*Q\s*S|\d\s*QTS\s*S|\d\s*DORM\s*S|\d\s*Q|\d\s*QTS|\d\s*DORM|\d\s*D)\b', s, re.IGNORECASE)
     tipologia = tipo_match.group(1) if tipo_match else '-'
     
-    # Limpa o Bloco/Torre (ex: GRAN PRIMAVERA - TORRE 01)
     clean_torre = re.split(r'\s*-\s*\d\s*Q|\s*-\s*\d\s*D|\s*-\s*APTO|\s*-\s*UNIDADE', s, flags=re.IGNORECASE)[0].strip()
     bloco = clean_torre if clean_torre else s
     
@@ -83,27 +80,33 @@ def categorizar_vaga(row, col_moto='', col_carro=''):
     return 'Sem Vaga'
 
 def auto_detect_columns(df):
-    mapping = {'bloco': None, 'apto': None, 'tipologia': None, 'area': None, 'valor_imovel': None, 'valor_avaliacao': None, 'carro': None, 'moto': None}
+    mapping = {'empreendimento': None, 'bloco': None, 'apto': None, 'tipologia': None, 'area': None, 'valor_imovel': None, 'valor_avaliacao': None, 'carro': None, 'moto': None}
     
     for col in df.columns:
         c_lower = str(col).lower()
-        if any(k in c_lower for k in ['bloco', 'torre', 'empreend', 'unidade', 'apto']):
-            if not mapping['bloco']: mapping['bloco'] = col
-        if any(k in c_lower for k in ['area', 'área', 'm2', 'privativa']):
-            if not mapping['area']: mapping['area'] = col
-        if any(k in c_lower for k in ['venda', 'imovel', 'imóvel', 'preço', 'preco']) and 'aval' not in c_lower:
-            if not mapping['valor_imovel']: mapping['valor_imovel'] = col
-        if any(k in c_lower for k in ['aval']):
-            if not mapping['valor_avaliacao']: mapping['valor_avaliacao'] = col
-        if 'carro' in c_lower:
-            if not mapping['carro']: mapping['carro'] = col
-        if 'moto' in c_lower:
-            if not mapping['moto']: mapping['moto'] = col
+        if any(k in c_lower for k in ['empreendimento', 'empreend', 'projeto']) and not mapping['empreendimento']:
+            mapping['empreendimento'] = col
+        elif any(k in c_lower for k in ['bloco', 'torre']) and not mapping['bloco']:
+            mapping['bloco'] = col
+        elif any(k in c_lower for k in ['apto', 'unidade', 'apartamento']) and not mapping['apto']:
+            mapping['apto'] = col
+        elif any(k in c_lower for k in ['tipologia', 'tipo', 'planta', 'dorm']) and not mapping['tipologia']:
+            mapping['tipologia'] = col
+        elif any(k in c_lower for k in ['area', 'área', 'm2', 'privativa']) and not mapping['area']:
+            mapping['area'] = col
+        elif any(k in c_lower for k in ['venda', 'imovel', 'imóvel', 'preço', 'preco']) and 'aval' not in c_lower and not mapping['valor_imovel']:
+            mapping['valor_imovel'] = col
+        elif any(k in c_lower for k in ['aval']) and not mapping['valor_avaliacao']:
+            mapping['valor_avaliacao'] = col
+        elif 'carro' in c_lower and not mapping['carro']:
+            mapping['carro'] = col
+        elif 'moto' in c_lower and not mapping['moto']:
+            mapping['moto'] = col
 
     sample_rows = df.head(10)
     for col in df.columns:
         vals = [str(v).strip() for v in sample_rows[col].dropna()]
-        if not mapping['bloco'] and any('TORRE' in v.upper() or 'APTO' in v.upper() for v in vals):
+        if not mapping['bloco'] and any('TORRE' in v.upper() or 'BLOCO' in v.upper() for v in vals) and any('APTO' in v.upper() for v in vals):
             mapping['bloco'] = col
         if not mapping['area']:
             numeric_vals = []
@@ -209,36 +212,69 @@ if uploaded_file is not None:
         def idx_of(val):
             return colunas_disponiveis.index(val) if val in colunas_disponiveis else 0
 
-        col1, col2, col3 = st.columns(3)
+        # Primeira Linha de mapeamento com o EMPREENDIMENTO
+        col_emp_ui, col1, col2 = st.columns(3)
+        with col_emp_ui:
+            sel_emp_col = st.selectbox("Coluna do Empreendimento:", colunas_disponiveis, index=idx_of(mapping_auto['empreendimento']))
         with col1:
             sel_bloco = st.selectbox("Coluna do Bloco/Torre:", colunas_disponiveis, index=idx_of(mapping_auto['bloco']))
-            sel_apto = st.selectbox("Coluna do Apto/Unidade:", colunas_disponiveis, index=idx_of(mapping_auto['apto']))
         with col2:
-            sel_tipo = st.selectbox("Coluna da Tipologia/Planta:", colunas_disponiveis, index=idx_of(mapping_auto['tipologia']))
-            sel_area = st.selectbox("Coluna da Área Total/Privativa:", colunas_disponiveis, index=idx_of(mapping_auto['area']))
-        with col3:
-            sel_valor = st.selectbox("Coluna do Valor do Imóvel:", colunas_disponiveis, index=idx_of(mapping_auto['valor_imovel']))
-            sel_avaliacao = st.selectbox("Coluna do Valor da Avaliação:", colunas_disponiveis, index=idx_of(mapping_auto['valor_avaliacao']))
+            sel_apto = st.selectbox("Coluna do Apto/Unidade:", colunas_disponiveis, index=idx_of(mapping_auto['apto']))
 
-        col_vaga1, col_vaga2 = st.columns(2)
-        with col_vaga1:
+        col3, col4, col5 = st.columns(3)
+        with col3:
+            sel_tipo = st.selectbox("Coluna da Tipologia/Planta:", colunas_disponiveis, index=idx_of(mapping_auto['tipologia']))
+        with col4:
+            sel_area = st.selectbox("Coluna da Área Total/Privativa:", colunas_disponiveis, index=idx_of(mapping_auto['area']))
+        with col5:
+            sel_valor = st.selectbox("Coluna do Valor do Imóvel:", colunas_disponiveis, index=idx_of(mapping_auto['valor_imovel']))
+
+        col6, col7, col8 = st.columns(3)
+        with col6:
+            sel_avaliacao = st.selectbox("Coluna Valor da Avaliação:", colunas_disponiveis, index=idx_of(mapping_auto['valor_avaliacao']))
+        with col7:
             sel_carro = st.selectbox("Coluna Vaga Carro:", colunas_disponiveis, index=idx_of(mapping_auto['carro']))
-        with col_vaga2:
+        with col8:
             sel_moto = st.selectbox("Coluna Vaga Moto:", colunas_disponiveis, index=idx_of(mapping_auto['moto']))
+
+        st.markdown("---")
+
+        # OPÇÃO DE ESCOLHER O EMPREENDIMENTO
+        if sel_emp_col != "(Nenhuma / Não existe)":
+            lista_empreendimentos = [str(e).strip() for e in df[sel_emp_col].dropna().unique() if str(e).strip() != '']
+            if len(lista_empreendimentos) > 1:
+                st.subheader("🏢 Seleção de Empreendimento")
+                st.info("Foram encontrados vários empreendimentos neste arquivo. Selecione qual deseja exportar ou processe todos juntos.")
+                emp_escolhido = st.selectbox("Escolha como gerar o relatório:", ["Processar Todos (Juntos)"] + lista_empreendimentos)
+            else:
+                emp_escolhido = lista_empreendimentos[0] if lista_empreendimentos else "Processar Todos (Juntos)"
+        else:
+            emp_escolhido = "Processar Todos (Juntos)"
 
         if st.button("🚀 Gerar Relatório Formatado em Excel", type="primary"):
             with st.spinner("Processando dados e formatando Excel..."):
                 
-                s_bloco = df[sel_bloco] if sel_bloco in df.columns else pd.Series(['-']*len(df))
-                s_apto = df[sel_apto] if sel_apto in df.columns else pd.Series(['-']*len(df))
-                s_tipo = df[sel_tipo] if sel_tipo in df.columns else pd.Series(['-']*len(df))
-                s_area = get_area_series(df, sel_area)
-                s_valor = df[sel_valor] if sel_valor in df.columns else pd.Series([0]*len(df))
-                s_aval = df[sel_avaliacao] if sel_avaliacao in df.columns else pd.Series([0]*len(df))
+                # FILTRA OS DADOS SE UM EMPREENDIMENTO ESPECÍFICO FOI ESCOLHIDO
+                if emp_escolhido != "Processar Todos (Juntos)":
+                    df_filtrado = df[df[sel_emp_col].astype(str).str.strip() == emp_escolhido].copy()
+                    nome_aba_principal = emp_escolhido.upper()
+                else:
+                    df_filtrado = df.copy()
+                    nome_aba_principal = "ESTOQUE GERAL"
 
-                res_bloco, res_apto, res_tipo_orig = [], [], []
+                # Séries dos dados
+                s_emp = df_filtrado[sel_emp_col] if sel_emp_col in df_filtrado.columns else pd.Series(['-']*len(df_filtrado))
+                s_bloco = df_filtrado[sel_bloco] if sel_bloco in df_filtrado.columns else pd.Series(['-']*len(df_filtrado))
+                s_apto = df_filtrado[sel_apto] if sel_apto in df_filtrado.columns else pd.Series(['-']*len(df_filtrado))
+                s_tipo = df_filtrado[sel_tipo] if sel_tipo in df_filtrado.columns else pd.Series(['-']*len(df_filtrado))
+                s_area = get_area_series(df_filtrado, sel_area)
+                s_valor = df_filtrado[sel_valor] if sel_valor in df_filtrado.columns else pd.Series([0]*len(df_filtrado))
+                s_aval = df_filtrado[sel_avaliacao] if sel_avaliacao in df_filtrado.columns else pd.Series([0]*len(df_filtrado))
 
-                for idx in range(len(df)):
+                res_emp, res_bloco, res_apto, res_tipo_orig = [], [], [], []
+
+                for idx in range(len(df_filtrado)):
+                    raw_e = str(s_emp.iloc[idx]).strip()
                     raw_b = str(s_bloco.iloc[idx]).strip()
                     raw_a = str(s_apto.iloc[idx]).strip()
                     raw_t = str(s_tipo.iloc[idx]).strip()
@@ -253,18 +289,20 @@ if uploaded_file is not None:
                         final_a = raw_a if raw_a not in ['nan', 'None', ''] else '-'
                         final_t = raw_t if raw_t not in ['nan', 'None', ''] else '-'
 
+                    res_emp.append(limpar_texto(raw_e))
                     res_bloco.append(limpar_texto(final_b))
                     res_apto.append(limpar_texto(final_a))
                     res_tipo_orig.append(limpar_texto(final_t))
 
                 df_proc = pd.DataFrame({
+                    'Empreendimento': res_emp,
                     'Bloco': res_bloco,
                     'Apto': res_apto,
                     'Tipologia_Orig': res_tipo_orig,
                     'Área': [converter_numero_br(v) for v in s_area],
                     'Valor_Imovel': [converter_numero_br(v) for v in s_valor],
                     'Valor_Avaliacao': [converter_numero_br(v) for v in s_aval],
-                    'Categoria_Vaga': [categorizar_vaga(row, col_moto=sel_moto, col_carro=sel_carro) for _, row in df.iterrows()]
+                    'Categoria_Vaga': [categorizar_vaga(row, col_moto=sel_moto, col_carro=sel_carro) for _, row in df_filtrado.iterrows()]
                 })
                 df_proc['Tipologia_Clean'] = df_proc['Tipologia_Orig'].apply(mapear_tipologia)
 
@@ -274,12 +312,12 @@ if uploaded_file is not None:
 
                 fill_title = PatternFill(start_color='1B365D', end_color='1B365D', fill_type='solid')
                 font_title = Font(name='Calibri', size=14, bold=True, color='FFFFFF')
-                headers = ['Bloco/Torre', 'Apto/Unidade', 'Tipologia Original', 'Área Total (m²)', 'Valor Imóvel (R$)', 'Valor Avaliação (R$)']
+                headers = ['Empreendimento', 'Bloco/Torre', 'Apto/Unidade', 'Tipologia Original', 'Área Total (m²)', 'Valor Imóvel (R$)', 'Valor Avaliação (R$)']
 
                 # ABA 1: ESTOQUE GERAL
                 ws_geral = wb.create_sheet(title="Estoque Geral")
-                ws_geral.merge_cells('A1:F1')
-                ws_geral['A1'] = "RELATÓRIO DE ESTOQUE — TODAS AS UNIDADES"
+                ws_geral.merge_cells('A1:G1')
+                ws_geral['A1'] = f"{nome_aba_principal} — TODAS AS UNIDADES"
                 ws_geral['A1'].font = font_title
                 ws_geral['A1'].fill = fill_title
                 ws_geral['A1'].alignment = Alignment(horizontal='center', vertical='center')
@@ -289,7 +327,7 @@ if uploaded_file is not None:
 
                 for _, row in df_proc.iterrows():
                     ws_geral.append([
-                        row['Bloco'], row['Apto'], row['Tipologia_Orig'],
+                        row['Empreendimento'], row['Bloco'], row['Apto'], row['Tipologia_Orig'],
                         row['Área'], row['Valor_Imovel'], row['Valor_Avaliacao']
                     ])
 
@@ -315,8 +353,8 @@ if uploaded_file is not None:
                     else:
                         sub_df = df_proc[(df_proc['Categoria_Vaga'] == cat_key) & (df_proc['Tipologia_Clean'] == tipo_key)]
                     
-                    ws.merge_cells('A1:F1')
-                    ws['A1'] = f"ESTOQUE — {cat_key.upper()} ({tipo_key})"
+                    ws.merge_cells('A1:G1')
+                    ws['A1'] = f"{nome_aba_principal} — {cat_key.upper()} ({tipo_key})"
                     ws['A1'].font = font_title
                     ws['A1'].fill = fill_title
                     ws['A1'].alignment = Alignment(horizontal='center', vertical='center')
@@ -326,17 +364,17 @@ if uploaded_file is not None:
                     
                     for _, row in sub_df.iterrows():
                         ws.append([
-                            row['Bloco'], row['Apto'], row['Tipologia_Orig'],
+                            row['Empreendimento'], row['Bloco'], row['Apto'], row['Tipologia_Orig'],
                             row['Área'], row['Valor_Imovel'], row['Valor_Avaliacao']
                         ])
 
                 # Formatação no Excel
                 for sheet in wb.worksheets:
-                    for row in sheet.iter_rows(min_row=4, max_col=6):
-                        if len(row) >= 6:
-                            row[3].number_format = '#,##0.00'
-                            row[4].number_format = 'R$ #,##0.00'
+                    for row in sheet.iter_rows(min_row=4, max_col=7):
+                        if len(row) >= 7:
+                            row[4].number_format = '#,##0.00'
                             row[5].number_format = 'R$ #,##0.00'
+                            row[6].number_format = 'R$ #,##0.00'
                     for col in sheet.columns:
                         max_len = max(len(str(cell.value or '')) for cell in col)
                         col_letter = get_column_letter(col[0].column)
@@ -347,9 +385,12 @@ if uploaded_file is not None:
                 
                 st.success("Relatório gerado com sucesso!")
                 
+                nome_f = f"Relatorio_{emp_escolhido.replace(' ', '_')}.xlsx" if emp_escolhido != "Processar Todos (Juntos)" else "Relatorio_Estoque_Geral_Completo.xlsx"
+                
                 st.download_button(
                     label="📥 Baixar Relatório Excel Formatado",
                     data=processed_data,
-                    file_name="Relatorio_Estoque_Formatado.xlsx",
+                    file_name=nome_f,
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
+                
