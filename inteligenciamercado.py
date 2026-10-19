@@ -6,6 +6,7 @@ from openpyxl.utils import get_column_letter
 import io
 import pdfplumber
 import re
+import datetime
 
 st.set_page_config(page_title="Relatório de Estoque", layout="wide")
 
@@ -193,7 +194,7 @@ if uploaded_file is not None:
             filtro_emp = st.multiselect(
                 "Selecione os empreendimentos para incluir no relatório:",
                 options=lista_emps,
-                default=lista_emps # Vem tudo selecionado por defeito
+                default=lista_emps
             )
         else:
             filtro_emp = []
@@ -255,22 +256,87 @@ if uploaded_file is not None:
                 wb = openpyxl.Workbook()
                 wb.remove(wb.active)
 
+                data_hoje = datetime.datetime.now().strftime("%d/%m")
                 fill_title = PatternFill(start_color='1B365D', end_color='1B365D', fill_type='solid')
                 font_title = Font(name='Calibri', size=14, bold=True, color='FFFFFF')
+                font_subtitle = Font(name='Calibri', size=11, italic=True, color='FFFFFF')
+                fill_kpi_header = PatternFill(start_color='F2F4F8', end_color='F2F4F8', fill_type='solid')
+                font_kpi_header = Font(name='Calibri', size=10, bold=True, color='595959')
+                fill_kpi_val = PatternFill(start_color='F8F9FA', end_color='F8F9FA', fill_type='solid')
+                font_kpi_val = Font(name='Calibri', size=16, bold=True, color='1B365D')
+                font_kpi_sub = Font(name='Calibri', size=9, italic=True, color='808080')
+                border_thin = Border(left=Side(style='thin', color='D9D9D9'), right=Side(style='thin', color='D9D9D9'), top=Side(style='thin', color='D9D9D9'), bottom=Side(style='thin', color='D9D9D9'))
+
                 headers = ['Empreendimento', 'Bloco/Torre', 'Apto/Unidade', 'Tipologia Original', 'Área Total (m²)', 'Valor Imóvel (R$)', 'Valor Avaliação (R$)']
 
-                ws_geral = wb.create_sheet(title="Estoque Geral")
-                ws_geral.merge_cells('A1:G1')
-                ws_geral['A1'] = "RELATÓRIO DE ESTOQUE"
-                ws_geral['A1'].font = font_title
-                ws_geral['A1'].fill = fill_title
-                ws_geral['A1'].alignment = Alignment(horizontal='center', vertical='center')
-                
-                ws_geral.append([])
-                ws_geral.append(headers)
+                def aplicar_kpis(ws, titulo, df_tab):
+                    total_unid = len(df_tab)
+                    area_media = df_tab['Área'].mean() if total_unid > 0 else 0
+                    val_imovel = df_tab['Valor_Imovel'].mean() if total_unid > 0 else 0
+                    val_aval = df_tab['Valor_Avaliacao'].mean() if total_unid > 0 else 0
 
-                for _, row in df_proc.iterrows():
-                    ws_geral.append([row['Empreendimento'], row['Bloco'], row['Apto'], row['Tipologia_Orig'], row['Área'], row['Valor_Imovel'], row['Valor_Avaliacao']])
+                    ws.merge_cells('A1:G1')
+                    ws['A1'] = titulo
+                    ws['A1'].font = font_title
+                    ws['A1'].fill = fill_title
+                    ws['A1'].alignment = Alignment(horizontal='center', vertical='center')
+
+                    ws.merge_cells('A2:G2')
+                    ws['A2'] = f"Resumo Automático de Estoque e Vagas (Base: {data_hoje})"
+                    ws['A2'].font = font_subtitle
+                    ws['A2'].fill = fill_title
+                    ws['A2'].alignment = Alignment(horizontal='center', vertical='center')
+
+                    ws.merge_cells('A4:B4')
+                    ws['A4'] = "TOTAL DE UNIDADES"
+                    ws.merge_cells('C4:D4')
+                    ws['C4'] = "ÁREA MÉDIA (TOTAL)"
+                    ws['E4'] = "VALOR MÉDIO DO IMÓVEL"
+                    ws.merge_cells('F4:G4')
+                    ws['F4'] = "VALOR MÉDIO DE AVALIAÇÃO"
+
+                    for c in ['A4','B4','C4','D4','E4','F4','G4']:
+                        ws[c].fill = fill_kpi_header
+                        ws[c].font = font_kpi_header
+                        ws[c].alignment = Alignment(horizontal='center', vertical='center')
+                        ws[c].border = border_thin
+
+                    ws.merge_cells('A5:B5')
+                    ws['A5'] = total_unid
+                    ws.merge_cells('C5:D5')
+                    ws['C5'] = f"{area_media:,.2f} m²".replace(',', 'X').replace('.', ',').replace('X', '.')
+                    ws['E5'] = f"R$ {val_imovel:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
+                    ws.merge_cells('F5:G5')
+                    ws['F5'] = f"R$ {val_aval:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
+
+                    for c in ['A5','B5','C5','D5','E5','F5','G5']:
+                        ws[c].fill = fill_kpi_val
+                        ws[c].font = font_kpi_val
+                        ws[c].alignment = Alignment(horizontal='center', vertical='center')
+                        ws[c].border = border_thin
+
+                    ws.merge_cells('A6:B6')
+                    ws['A6'] = "unidades no estoque"
+                    ws.merge_cells('C6:D6')
+                    ws['C6'] = "Metragem média calculada"
+                    ws['E6'] = "Valor médio de tabela"
+                    ws.merge_cells('F6:G6')
+                    ws['F6'] = "Valor médio de avaliação"
+
+                    for c in ['A6','B6','C6','D6','E6','F6','G6']:
+                        ws[c].fill = fill_kpi_val # Usa a mesma cor de fundo
+                        ws[c].font = font_kpi_sub
+                        ws[c].alignment = Alignment(horizontal='center', vertical='center')
+                        ws[c].border = border_thin
+
+                    ws.append([])
+                    ws.append(headers)
+
+                    for _, row in df_tab.iterrows():
+                        ws.append([row['Empreendimento'], row['Bloco'], row['Apto'], row['Tipologia_Orig'], row['Área'], row['Valor_Imovel'], row['Valor_Avaliacao']])
+
+                ws_geral = wb.create_sheet(title="Estoque Geral")
+                aplicar_kpis(ws_geral, f"RELATÓRIO DE ESTOQUE — {nome_relatorio.upper()}", df_proc)
 
                 configuracoes = [
                     ('Moto 1Q', 'Vaga Moto', '1 Q'), ('Carro 1Q', 'Vaga Carro', '1 Q'), ('Sem Vaga 1Q', 'Sem Vaga', '1 Q'),
@@ -280,25 +346,16 @@ if uploaded_file is not None:
                 ]
 
                 for sheet_name, cat_key, tipo_key in configuracoes:
-                    ws = wb.create_sheet(title=sheet_name)
-                    
                     if cat_key == 'TODAS': sub_df = df_proc[df_proc['Tipologia_Clean'] == tipo_key]
                     else: sub_df = df_proc[(df_proc['Categoria_Vaga'] == cat_key) & (df_proc['Tipologia_Clean'] == tipo_key)]
                     
-                    ws.merge_cells('A1:G1')
-                    ws['A1'] = f"ESTOQUE — {cat_key.upper()} ({tipo_key})"
-                    ws['A1'].font = font_title
-                    ws['A1'].fill = fill_title
-                    ws['A1'].alignment = Alignment(horizontal='center', vertical='center')
+                    if sub_df.empty: continue
                     
-                    ws.append([])
-                    ws.append(headers)
-                    
-                    for _, row in sub_df.iterrows():
-                        ws.append([row['Empreendimento'], row['Bloco'], row['Apto'], row['Tipologia_Orig'], row['Área'], row['Valor_Imovel'], row['Valor_Avaliacao']])
+                    ws = wb.create_sheet(title=sheet_name)
+                    aplicar_kpis(ws, f"{nome_relatorio.upper()} — {cat_key.upper()} ({tipo_key})", sub_df)
 
                 for sheet in wb.worksheets:
-                    for row in sheet.iter_rows(min_row=4, max_col=7):
+                    for row in sheet.iter_rows(min_row=9, max_col=7): # Dados começam agora na linha 9!
                         if len(row) >= 7:
                             row[4].number_format = '#,##0.00'
                             row[5].number_format = 'R$ #,##0.00'
@@ -318,5 +375,4 @@ if uploaded_file is not None:
                     data=processed_data,
                     file_name=f"Relatorio_{nome_relatorio.replace(' ', '_')}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-                
+                )  
