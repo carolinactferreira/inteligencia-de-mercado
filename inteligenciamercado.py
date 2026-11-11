@@ -99,28 +99,55 @@ def get_area_series(df, sel_area):
 
 def extrair_tabelas_pdf(file_bytes):
     todas_linhas = []
-    with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
-        for page in pdf.pages:
-            tabelas = page.extract_tables()
-            for tabela in tabelas:
-                if tabela:
-                    for r in tabela:
-                        if any(r): todas_linhas.append([str(c).strip().replace('\n', ' ') if c is not None else '' for c in r])
-            if not tabelas:
-                texto = page.extract_text()
-                if texto:
-                    for line in texto.split('\n'):
-                        parts = line.split()
-                        if len(parts) >= 3: todas_linhas.append(parts)
-    if not todas_linhas: return pd.DataFrame()
+    try:
+        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+            for page in pdf.pages:
+                # Estratégia 1: Bordas explícitas
+                tabelas = page.extract_tables()
+                
+                # Estratégia 2: Se sem bordas, alinhamento por texto
+                if not tabelas:
+                    tabelas = page.extract_tables(table_settings={
+                        "vertical_strategy": "text",
+                        "horizontal_strategy": "text",
+                        "snap_tolerance": 4,
+                        "join_tolerance": 4
+                    })
+                
+                if tabelas:
+                    for tabela in tabelas:
+                        if tabela:
+                            for r in tabela:
+                                if r and any(r):
+                                    todas_linhas.append([str(c).strip().replace('\n', ' ') if c is not None else '' for c in r])
+                else:
+                    # Estratégia 3: Leitura de palavras por posição Y
+                    words = page.extract_words()
+                    if words:
+                        lines_dict = {}
+                        for w in words:
+                            top_rounded = round(w['top'] / 4) * 4
+                            lines_dict.setdefault(top_rounded, []).append(w)
+                        
+                        for top_key in sorted(lines_dict.keys()):
+                            line_words = sorted(lines_dict[top_key], key=lambda x: x['x0'])
+                            text_line = [w['text'] for w in line_words]
+                            if len(text_line) >= 2:
+                                todas_linhas.append(text_line)
+    except Exception as e:
+        st.error(f"Erro ao processar estrutura do PDF: {e}")
+        return pd.DataFrame()
+
+    if not todas_linhas:
+        return pd.DataFrame()
 
     header_idx = 0
-    for idx, row in enumerate(todas_linhas[:10]):
+    for idx, row in enumerate(todas_linhas[:15]):
         row_str = " ".join(row).lower()
-        if any(k in row_str for k in ['bloco', 'torre', 'apto', 'unidade', 'tipologia', 'valor', 'área', 'area', 'vaga']):
+        if any(k in row_str for k in ['bloco', 'torre', 'apto', 'unidade', 'tipologia', 'valor', 'área', 'area', 'vaga', 'empreend']):
             header_idx = idx
             break
-            
+
     header = todas_linhas[header_idx]
     seen = {}
     header_unico = []
@@ -132,15 +159,18 @@ def extrair_tabelas_pdf(file_bytes):
         else:
             seen[clean_h] = 0
             header_unico.append(clean_h)
-            
+
     dados = todas_linhas[header_idx + 1:]
     dados_limpos = []
     for r in dados:
         if len(r) == len(header_unico):
-            if " ".join(r).lower() != " ".join(header).lower(): dados_limpos.append(r)
-        elif len(r) < len(header_unico): dados_limpos.append(r + [''] * (len(header_unico) - len(r)))
-        else: dados_limpos.append(r[:len(header_unico)])
-            
+            if " ".join(r).lower() != " ".join(header).lower():
+                dados_limpos.append(r)
+        elif len(r) < len(header_unico):
+            dados_limpos.append(r + [''] * (len(header_unico) - len(r)))
+        else:
+            dados_limpos.append(r[:len(header_unico)])
+
     return pd.DataFrame(dados_limpos, columns=header_unico)
 
 uploaded_file = st.file_uploader("Arraste sua planilha (.xlsx) ou arquivo (.pdf) aqui", type=["xlsx", "pdf"])
@@ -154,7 +184,7 @@ if uploaded_file is not None:
         df.columns = [str(c).strip().replace('\n', ' ') for c in df.columns]
         
     if df.empty:
-        st.error("Não foi possível extrair dados do arquivo enviado.")
+        st.error("Não foi possível extrair dados do arquivo enviado. Verifique se o PDF não é uma imagem digitalizada.")
     else:
         st.subheader("📋 Dados Brutos Identificados no Arquivo")
         st.write(f"Total de registros encontrados: **{len(df)} linhas**")
@@ -324,7 +354,7 @@ if uploaded_file is not None:
                     ws['F6'] = "Valor médio de avaliação"
 
                     for c in ['A6','B6','C6','D6','E6','F6','G6']:
-                        ws[c].fill = fill_kpi_val # Usa a mesma cor de fundo
+                        ws[c].fill = fill_kpi_val
                         ws[c].font = font_kpi_sub
                         ws[c].alignment = Alignment(horizontal='center', vertical='center')
                         ws[c].border = border_thin
@@ -355,7 +385,7 @@ if uploaded_file is not None:
                     aplicar_kpis(ws, f"{nome_relatorio.upper()} — {cat_key.upper()} ({tipo_key})", sub_df)
 
                 for sheet in wb.worksheets:
-                    for row in sheet.iter_rows(min_row=9, max_col=7): # Dados começam agora na linha 9!
+                    for row in sheet.iter_rows(min_row=9, max_col=7):
                         if len(row) >= 7:
                             row[4].number_format = '#,##0.00'
                             row[5].number_format = 'R$ #,##0.00'
@@ -375,4 +405,5 @@ if uploaded_file is not None:
                     data=processed_data,
                     file_name=f"Relatorio_{nome_relatorio.replace(' ', '_')}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )  
+                )
+            
