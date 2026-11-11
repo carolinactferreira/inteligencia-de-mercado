@@ -155,6 +155,7 @@ def get_area_series(df, sel_area):
 
 def extrair_tabelas_pdf(file_bytes):
   todas_linhas = []
+  usou_ocr = False
   try:
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
       for page in pdf.pages:
@@ -183,20 +184,57 @@ def extrair_tabelas_pdf(file_bytes):
     pass
 
   if not todas_linhas:
+    usou_ocr = True
     try:
       images = convert_from_bytes(file_bytes)
       for img in images:
         texto_ocr = pytesseract.image_to_string(img, lang="por")
         for line in texto_ocr.split("\n"):
-          parts = [p.strip() for p in line.split() if p.strip()]
-          if len(parts) >= 2:
-            todas_linhas.append(parts)
+          linha_limpa = line.strip()
+          if linha_limpa and len(linha_limpa) > 10:
+              todas_linhas.append([linha_limpa])
     except Exception as e:
       st.error(f"Erro ao processar imagem digitalizada via OCR: {e}")
       return pd.DataFrame()
 
   if not todas_linhas:
     return pd.DataFrame()
+
+  if usou_ocr:
+      dados_estruturados = []
+      for row in todas_linhas:
+          texto = row[0]
+          apto_match = re.search(r"(?:APTO|UNIDADE|APT)\s*[:\.-]?\s*([A-Za-z0-9]+)", texto, re.IGNORECASE)
+          apto_val = apto_match.group(1) if apto_match else "-"
+          
+          torre_match = re.search(r"(TORRE|BLOCO)\s*([A-Za-z0-9]+)", texto, re.IGNORECASE)
+          torre_val = f"{torre_match.group(1)} {torre_match.group(2)}" if torre_match else "-"
+          
+          emp_val = "-"
+          if torre_match:
+              emp_val = texto[:torre_match.start()].strip()
+              emp_val = re.sub(r"^[^a-zA-Z]+", "", emp_val)
+              
+          valores_encontrados = re.findall(r"R\$\s*[\d\.,]+|[\d\.]+\,\d{2}", texto)
+          valor_imovel = valores_encontrados[0] if len(valores_encontrados) > 0 else "0"
+          valor_aval = valores_encontrados[1] if len(valores_encontrados) > 1 else "0"
+          
+          area_val = "0"
+          areas_encontradas = re.findall(r"\b(\d{2,3}\,\d{2})\b", texto)
+          if areas_encontradas:
+              area_val = areas_encontradas[0]
+
+          tipo_val = "-"
+          tipo_match = re.search(r"\b(\d\s*Q\s*S|\d\s*QTS\s*S|\d\s*Q|\d\s*DORM|\d\s*D)\b", texto, re.IGNORECASE)
+          if tipo_match:
+              tipo_val = tipo_match.group(1)
+
+          dados_estruturados.append([emp_val, torre_val, apto_val, tipo_val, area_val, valor_imovel, valor_aval, "", ""])
+          
+      return pd.DataFrame(dados_estruturados, columns=[
+          "Empreendimento", "Bloco/Torre", "Apto/Unidade", "Tipologia", 
+          "Área", "Valor Imóvel", "Valor Avaliação", "Carro", "Moto"
+      ])
 
   header_idx = 0
   for idx, row in enumerate(todas_linhas[:15]):
@@ -351,9 +389,6 @@ if uploaded_file is not None:
         df_proc["Tipologia_Clean"] = df_proc["Tipologia_Orig"].apply(mapear_tipologia)
 
         # --- FILTRO ANTILIXO (RIGOROSO) ---
-        # Só permite a linha no relatório se tiver um Valor de Imóvel, uma Área,
-        # ou se a coluna do Apto/Unidade ou Bloco contiver números reais (excluindo "Q.-", "APTO", "-").
-        
         def contem_numero(texto):
             return any(char.isdigit() for char in str(texto))
 
