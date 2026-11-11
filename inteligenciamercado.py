@@ -43,7 +43,6 @@ def limpar_texto(val, padrao="-"):
 
 def parse_concatenated_string(text_str):
   s = str(text_str).strip()
-  # Regex ajustada para evitar capturar lixo como "Q.-"
   apto_match = re.search(
       r"(?:APTO|APT|UNIDADE|UP|AP)\s*[:\.-]?\s*([A-Za-z0-9]+)", s, re.IGNORECASE
   )
@@ -220,7 +219,6 @@ def extrair_tabelas_pdf(file_bytes):
 
   dados = todas_linhas[header_idx + 1 :]
   
-  # --- CORREÇÃO DO OCR: Expande as colunas extra em vez de as apagar ---
   max_len = max([len(r) for r in dados]) if dados else len(header_unico)
   if max_len > len(header_unico):
       for i in range(len(header_unico), max_len):
@@ -352,13 +350,18 @@ if uploaded_file is not None:
         })
         df_proc["Tipologia_Clean"] = df_proc["Tipologia_Orig"].apply(mapear_tipologia)
 
-        # --- FILTRO ANTILIXO ---
-        # Remove linhas de lixo lidas pelo OCR (onde Bloco, Apto e Valor estão simultaneamente vazios/zerados)
+        # --- FILTRO ANTILIXO (RIGOROSO) ---
+        # Só permite a linha no relatório se tiver um Valor de Imóvel, uma Área,
+        # ou se a coluna do Apto/Unidade ou Bloco contiver números reais (excluindo "Q.-", "APTO", "-").
+        
+        def contem_numero(texto):
+            return any(char.isdigit() for char in str(texto))
+
         df_proc = df_proc[
-            (df_proc["Bloco"] != "-") | 
-            (df_proc["Apto"] != "-") | 
             (df_proc["Valor_Imovel"] > 0) | 
-            (df_proc["Área"] > 0)
+            (df_proc["Área"] > 0) | 
+            (df_proc["Apto"].apply(contem_numero)) |
+            (df_proc["Bloco"].apply(contem_numero))
         ]
 
         output = io.BytesIO()
