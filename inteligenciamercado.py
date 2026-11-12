@@ -204,6 +204,8 @@ def extrair_tabelas_pdf(file_bytes):
       dados_estruturados = []
       for row in todas_linhas:
           texto = row[0]
+          
+          # Extrair Apto e Torre
           apto_match = re.search(r"(?:APTO|UNIDADE|APT)\s*[:\.-]?\s*([A-Za-z0-9]+)", texto, re.IGNORECASE)
           apto_val = apto_match.group(1) if apto_match else "-"
           
@@ -215,14 +217,27 @@ def extrair_tabelas_pdf(file_bytes):
               emp_val = texto[:torre_match.start()].strip()
               emp_val = re.sub(r"^[^a-zA-Z]+", "", emp_val)
               
-          valores_encontrados = re.findall(r"R\$\s*[\d\.,]+|[\d\.]+\,\d{2}", texto)
-          valor_imovel = valores_encontrados[0] if len(valores_encontrados) > 0 else "0"
-          valor_aval = valores_encontrados[1] if len(valores_encontrados) > 1 else "0"
+          # --- NOVA LÓGICA DE VALORES E ÁREAS BASEADA EM GRANDEZA ---
+          texto_limpo = texto.replace("R$ ", "R$").strip()
+          todos_numeros_com_virgula = re.findall(r"[\d\.]+\,\d{2}", texto_limpo)
           
+          valores_monetarios = []
           area_val = "0"
-          areas_encontradas = re.findall(r"\b(\d{2,3}\,\d{2})\b", texto)
-          if areas_encontradas:
-              area_val = areas_encontradas[0]
+          
+          for num_str in todos_numeros_com_virgula:
+              limpo = num_str.replace(".", "").replace(",", ".")
+              try:
+                  valor_numerico = float(limpo)
+                  if valor_numerico > 10000: # É preço
+                      valores_monetarios.append(num_str)
+                  elif 15 <= valor_numerico <= 400: # É metragem
+                      area_val = num_str
+              except:
+                  pass
+                  
+          valor_imovel = valores_monetarios[0] if len(valores_monetarios) > 0 else "0"
+          valor_aval = valores_monetarios[1] if len(valores_monetarios) > 1 else valor_imovel
+          # -----------------------------------------------------------
 
           tipo_val = "-"
           tipo_match = re.search(r"\b(\d\s*Q\s*S|\d\s*QTS\s*S|\d\s*Q|\d\s*DORM|\d\s*D)\b", texto, re.IGNORECASE)
