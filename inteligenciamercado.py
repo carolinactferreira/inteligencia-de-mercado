@@ -155,36 +155,25 @@ def get_area_series(df, sel_area):
 
 def extrair_tabelas_pdf(file_bytes):
   todas_linhas = []
-  usou_ocr = False
   try:
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
       for page in pdf.pages:
-        tabelas = page.extract_tables()
-        if not tabelas:
-          tabelas = page.extract_tables(table_settings={"vertical_strategy": "text", "horizontal_strategy": "text", "snap_tolerance": 4, "join_tolerance": 4})
-        if tabelas:
-          for tabela in tabelas:
-            if tabela:
-              for r in tabela:
-                if r and any(r):
-                  todas_linhas.append([str(c).strip().replace("\n", " ") if c is not None else "" for c in r])
-        else:
-          words = page.extract_words()
-          if words:
-            lines_dict = {}
-            for w in words:
-              top_rounded = round(w["top"] / 4) * 4
-              lines_dict.setdefault(top_rounded, []).append(w)
-            for top_key in sorted(lines_dict.keys()):
-              line_words = sorted(lines_dict[top_key], key=lambda x: x["x0"])
-              text_line = [w["text"] for w in line_words]
-              if len(text_line) >= 2:
-                todas_linhas.append(text_line)
+        # LÓGICA BLINDADA: Extrai palavras e agrupa por linha (ignora tabelas partidas)
+        words = page.extract_words()
+        if words:
+          lines_dict = {}
+          for w in words:
+            top_rounded = round(w["top"] / 4) * 4
+            lines_dict.setdefault(top_rounded, []).append(w)
+          for top_key in sorted(lines_dict.keys()):
+            line_words = sorted(lines_dict[top_key], key=lambda x: x["x0"])
+            text_line = " ".join([w["text"] for w in line_words])
+            if len(text_line.strip()) > 10:
+              todas_linhas.append(text_line.strip())
   except Exception:
     pass
 
   if not todas_linhas:
-    usou_ocr = True
     try:
       images = convert_from_bytes(file_bytes)
       for img in images:
@@ -192,7 +181,7 @@ def extrair_tabelas_pdf(file_bytes):
         for line in texto_ocr.split("\n"):
           linha_limpa = line.strip()
           if linha_limpa and len(linha_limpa) > 10:
-              todas_linhas.append([linha_limpa])
+              todas_linhas.append(linha_limpa)
     except Exception as e:
       st.error(f"Erro ao processar imagem digitalizada via OCR: {e}")
       return pd.DataFrame()
@@ -200,91 +189,65 @@ def extrair_tabelas_pdf(file_bytes):
   if not todas_linhas:
     return pd.DataFrame()
 
-  if usou_ocr:
-      dados_estruturados = []
-      for row in todas_linhas:
-          texto = row[0]
+  dados_estruturados = []
+  for texto in todas_linhas:
+      apto_match = re.search(r"(?:APTO|UNIDADE|APT)\s*[:\.-]?\s*([A-Za-z0-9]+)", texto, re.IGNORECASE)
+      apto_val = apto_match.group(1) if apto_match else "-"
+      
+      torre_match = re.search(r"(TORRE|BLOCO)\s*([A-Za-z0-9]+)", texto, re.IGNORECASE)
+      torre_val = f"{torre_match.group(1)} {torre_match.group(2)}" if torre_match else "-"
+      
+      emp_val = "-"
+      if torre_match:
+          emp_val = texto[:torre_match.start()].strip()
+          emp_val = re.sub(r"^[^a-zA-Z]+", "", emp_val)
           
-          # Extrair Apto e Torre
-          apto_match = re.search(r"(?:APTO|UNIDADE|APT)\s*[:\.-]?\s*([A-Za-z0-9]+)", texto, re.IGNORECASE)
-          apto_val = apto_match.group(1) if apto_match else "-"
-          
-          torre_match = re.search(r"(TORRE|BLOCO)\s*([A-Za-z0-9]+)", texto, re.IGNORECASE)
-          torre_val = f"{torre_match.group(1)} {torre_match.group(2)}" if torre_match else "-"
-          
-          emp_val = "-"
-          if torre_match:
-              emp_val = texto[:torre_match.start()].strip()
-              emp_val = re.sub(r"^[^a-zA-Z]+", "", emp_val)
+      # --- LÓGICA MATEMÁTICA DE VALORES E ÁREAS ---
+      texto_limpo = texto.replace("R$ ", "").replace("RS ", "").strip()
+      todos_numeros = re.findall(r"[\d][\d\.\,]+[\d]", texto_limpo)
+      
+      valores_monetarios = []
+      area_val = "0"
+      
+      for num_str in todos_numeros:
+          limpo = num_str
+          if "," in limpo and "." in limpo:
+              last_comma = limpo.rfind(",")
+              last_dot = limpo.rfind(".")
+              if last_comma > last_dot:
+                  limpo = limpo.replace(".", "").replace(",", ".")
+              else:
+                  limpo = limpo.replace(",", "")
+          elif "," in limpo:
+              limpo = limpo.replace(",", ".")
               
-          # --- NOVA LÓGICA DE VALORES E ÁREAS BASEADA EM GRANDEZA ---
-          texto_limpo = texto.replace("R$ ", "R$").strip()
-          todos_numeros_com_virgula = re.findall(r"[\d\.]+\,\d{2}", texto_limpo)
-          
-          valores_monetarios = []
-          area_val = "0"
-          
-          for num_str in todos_numeros_com_virgula:
-              limpo = num_str.replace(".", "").replace(",", ".")
-              try:
-                  valor_numerico = float(limpo)
-                  if valor_numerico > 10000: # É preço
-                      valores_monetarios.append(num_str)
-                  elif 15 <= valor_numerico <= 400: # É metragem
-                      area_val = num_str
-              except:
-                  pass
-                  
-          valor_imovel = valores_monetarios[0] if len(valores_monetarios) > 0 else "0"
-          valor_aval = valores_monetarios[1] if len(valores_monetarios) > 1 else valor_imovel
-          # -----------------------------------------------------------
+          parts = limpo.split(".")
+          if len(parts) > 2:
+              limpo = "".join(parts[:-1]) + "." + parts[-1]
+              
+          try:
+              valor_numerico = float(limpo)
+              if valor_numerico > 10000:
+                  valores_monetarios.append(num_str)
+              elif 15 <= valor_numerico <= 400:
+                  area_val = num_str
+          except:
+              pass
+              
+      valor_imovel = valores_monetarios[0] if len(valores_monetarios) > 0 else "0"
+      valor_aval = valores_monetarios[1] if len(valores_monetarios) > 1 else valor_imovel
 
-          tipo_val = "-"
-          tipo_match = re.search(r"\b(\d\s*Q\s*S|\d\s*QTS\s*S|\d\s*Q|\d\s*DORM|\d\s*D)\b", texto, re.IGNORECASE)
-          if tipo_match:
-              tipo_val = tipo_match.group(1)
+      tipo_val = "-"
+      tipo_match = re.search(r"\b(\d\s*Q\s*S|\d\s*QTS\s*S|\d\s*Q|\d\s*DORM|\d\s*D)\b", texto, re.IGNORECASE)
+      if tipo_match:
+          tipo_val = tipo_match.group(1)
 
-          dados_estruturados.append([emp_val, torre_val, apto_val, tipo_val, area_val, valor_imovel, valor_aval, "", ""])
-          
-      return pd.DataFrame(dados_estruturados, columns=[
-          "Empreendimento", "Bloco/Torre", "Apto/Unidade", "Tipologia", 
-          "Área", "Valor Imóvel", "Valor Avaliação", "Carro", "Moto"
-      ])
-
-  header_idx = 0
-  for idx, row in enumerate(todas_linhas[:15]):
-    row_str = " ".join(row).lower()
-    if any(k in row_str for k in ["bloco", "torre", "apto", "unidade", "tipologia", "valor", "área", "area", "vaga", "empreend"]):
-      header_idx = idx
-      break
-
-  header = todas_linhas[header_idx]
-  seen = {}
-  header_unico = []
-  for h in header:
-    clean_h = h if h else "col"
-    if clean_h in seen:
-      seen[clean_h] += 1
-      header_unico.append(f"{clean_h}_{seen[clean_h]}")
-    else:
-      seen[clean_h] = 0
-      header_unico.append(clean_h)
-
-  dados = todas_linhas[header_idx + 1 :]
-  
-  max_len = max([len(r) for r in dados]) if dados else len(header_unico)
-  if max_len > len(header_unico):
-      for i in range(len(header_unico), max_len):
-          header_unico.append(f"col_extra_{i+1}")
-          
-  dados_limpos = []
-  for r in dados:
-    if len(r) < len(header_unico):
-      dados_limpos.append(r + [""] * (len(header_unico) - len(r)))
-    else:
-      dados_limpos.append(r)
-
-  return pd.DataFrame(dados_limpos, columns=header_unico)
+      dados_estruturados.append([emp_val, torre_val, apto_val, tipo_val, area_val, valor_imovel, valor_aval, "", ""])
+      
+  return pd.DataFrame(dados_estruturados, columns=[
+      "Empreendimento", "Bloco/Torre", "Apto/Unidade", "Tipologia", 
+      "Área", "Valor Imóvel", "Valor Avaliação", "Carro", "Moto"
+  ])
 
 
 uploaded_file = st.file_uploader(
