@@ -162,7 +162,9 @@ def extrair_tabelas_pdf(file_bytes):
         if words:
           lines_dict = {}
           for w in words:
-            top_rounded = round(w["top"] / 4) * 4
+            # --- CORREÇÃO DE DESALINHAMENTO VERTICAL ---
+            # Tolerância aumentada para 15 pixels para resgatar valores impressos mais abaixo/acima
+            top_rounded = round(w["top"] / 15) * 15
             lines_dict.setdefault(top_rounded, []).append(w)
           for top_key in sorted(lines_dict.keys()):
             line_words = sorted(lines_dict[top_key], key=lambda x: x["x0"])
@@ -173,14 +175,13 @@ def extrair_tabelas_pdf(file_bytes):
     pass
 
   # --- DIAGNÓSTICO INTELIGENTE ---
-  # Verifica se a leitura normal encontrou efetivamente preços e áreas.
-  # Se o PDF esconder esses dados, o regex \d+(?:[\.\,]\d+)+ falha e forçamos o OCR.
   if todas_linhas:
-      has_values = any(re.search(r"\d+(?:[\.\,]\d+)+", linha) for linha in todas_linhas)
-      if not has_values:
-          todas_linhas = [] # Apaga os dados parciais para desencadear a leitura OCR
+      texto_completo = " ".join(todas_linhas).replace(".", "").replace(",", "")
+      # Se não encontrar nenhum número grande (> 10.000) no texto todo, descarta a leitura e força OCR
+      if not re.search(r"\d{5,}", texto_completo):
+          todas_linhas = []
 
-  # --- LEITURA POR OCR (SE A ANTERIOR FALHOU) ---
+  # --- LEITURA POR OCR (SE A ANTERIOR FALHOU OU FICOU CEGA AOS VALORES) ---
   if not todas_linhas:
     try:
       images = convert_from_bytes(file_bytes)
@@ -210,11 +211,10 @@ def extrair_tabelas_pdf(file_bytes):
           emp_val = texto[:torre_match.start()].strip()
           emp_val = re.sub(r"^[^a-zA-Z]+", "", emp_val)
           
-      texto_limpo = texto.replace("R$ ", "").replace("RS ", "").strip()
-      
-      # O REGEX BLINDADO: Só apanha números se eles tiverem um ponto ou vírgula pelo meio.
-      # Assim os números dos apartamentos "104" deixam de ser capturados.
-      todos_numeros = re.findall(r"\d+(?:[\.\,]\d+)+", texto_limpo)
+      # --- NOVA EXTRAÇÃO NUMÉRICA CEGA PARA FORMATOS ---
+      texto_limpo = texto.replace("R$ ", "").replace("RS ", "").replace("R$", "").strip()
+      # Captura qualquer bloco de números, independentemente de ter pontos ou não
+      todos_numeros = re.findall(r"\b\d+[\d\.\,]*\b", texto_limpo)
       
       valores_monetarios = []
       area_val = "0"
@@ -237,8 +237,10 @@ def extrair_tabelas_pdf(file_bytes):
               
           try:
               valor_numerico = float(limpo)
+              # Maior que 10 mil é preço do imóvel. Ignora anos (ex: 2026) e apartamentos (ex: 1005)
               if valor_numerico > 10000:
                   valores_monetarios.append(num_str)
+              # Entre 15 e 400 é área.
               elif 15 <= valor_numerico <= 400:
                   area_val = num_str
           except:
