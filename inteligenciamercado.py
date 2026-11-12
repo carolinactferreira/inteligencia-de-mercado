@@ -158,7 +158,6 @@ def extrair_tabelas_pdf(file_bytes):
   try:
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
       for page in pdf.pages:
-        # LÓGICA BLINDADA: Extrai palavras e agrupa por linha (ignora tabelas partidas)
         words = page.extract_words()
         if words:
           lines_dict = {}
@@ -173,6 +172,15 @@ def extrair_tabelas_pdf(file_bytes):
   except Exception:
     pass
 
+  # --- DIAGNÓSTICO INTELIGENTE ---
+  # Verifica se a leitura normal encontrou efetivamente preços e áreas.
+  # Se o PDF esconder esses dados, o regex \d+(?:[\.\,]\d+)+ falha e forçamos o OCR.
+  if todas_linhas:
+      has_values = any(re.search(r"\d+(?:[\.\,]\d+)+", linha) for linha in todas_linhas)
+      if not has_values:
+          todas_linhas = [] # Apaga os dados parciais para desencadear a leitura OCR
+
+  # --- LEITURA POR OCR (SE A ANTERIOR FALHOU) ---
   if not todas_linhas:
     try:
       images = convert_from_bytes(file_bytes)
@@ -202,9 +210,11 @@ def extrair_tabelas_pdf(file_bytes):
           emp_val = texto[:torre_match.start()].strip()
           emp_val = re.sub(r"^[^a-zA-Z]+", "", emp_val)
           
-      # --- LÓGICA MATEMÁTICA DE VALORES E ÁREAS ---
       texto_limpo = texto.replace("R$ ", "").replace("RS ", "").strip()
-      todos_numeros = re.findall(r"[\d][\d\.\,]+[\d]", texto_limpo)
+      
+      # O REGEX BLINDADO: Só apanha números se eles tiverem um ponto ou vírgula pelo meio.
+      # Assim os números dos apartamentos "104" deixam de ser capturados.
+      todos_numeros = re.findall(r"\d+(?:[\.\,]\d+)+", texto_limpo)
       
       valores_monetarios = []
       area_val = "0"
