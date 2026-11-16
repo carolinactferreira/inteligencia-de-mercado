@@ -5,7 +5,6 @@ import openpyxl
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 import pandas as pd
-import pdfplumber
 from pdf2image import convert_from_bytes
 import pytesseract
 import streamlit as st
@@ -47,29 +46,6 @@ def limpar_texto(val, padrao="-"):
   ]:
     return padrao
   return s
-
-
-def parse_concatenated_string(text_str):
-  s = str(text_str).strip()
-  apto_match = re.search(
-      r"(?:APTO|APT|UNIDADE|UP|AP)\s*[:\.-]?\s*([A-Za-z0-9]+)", s, re.IGNORECASE
-  )
-  apto = apto_match.group(1) if apto_match else "-"
-
-  tipo_match = re.search(
-      r"\b(\d\s*Q\s*S|\d\s*QTS\s*S|\d\s*DORM\s*S|\d\s*Q|\d\s*QTS|\d\s*DORM|\d\s*D)\b",
-      s,
-      re.IGNORECASE,
-  )
-  tipologia = tipo_match.group(1) if tipo_match else "-"
-
-  clean_torre = re.split(
-      r"\s*-\s*\d\s*Q|\s*-\s*\d\s*D|\s*-\s*APTO|\s*-\s*UNIDADE",
-      s,
-      flags=re.IGNORECASE,
-  )[0].strip()
-  bloco = clean_torre if clean_torre else s
-  return bloco, apto, tipologia
 
 
 def mapear_tipologia(t):
@@ -165,132 +141,174 @@ def auto_detect_columns(df):
 def get_area_series(df, sel_area):
   if sel_area in df.columns and sel_area != "(Nenhuma / Não existe)":
     return df[sel_area]
-  for col in df.columns:
-    vals = df[col].dropna()
-    parsed_vals = []
-    for v in vals:
-      try:
-        vf = float(str(v).replace(",", "."))
-        if 15.0 <= vf <= 400.0:
-          parsed_vals.append(vf)
-      except:
-        pass
-    if len(parsed_vals) >= len(vals) * 0.4 and len(vals) > 0:
-      return df[col]
   return pd.Series([0] * len(df))
 
 
 def extrair_tabelas_pdf(file_bytes):
   dados_estruturados = []
-  debug_linhas = []
 
   try:
-    with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
-      for page in pdf.pages:
-        words = page.extract_words()
-        if not words:
+    # Converte o PDF em imagens de alta definição para reconstruir as linhas horizontalmente
+    images = convert_from_bytes(file_bytes, dpi=250)
+
+    for img in images:
+      width, _ = img.size
+      ocr_data = pytesseract.image_to_data(
+          img, lang="por", config="--psm 6", output_type=pytesseract.Output.DICT
+      )
+
+      # Localiza as posições horizontais (X) exatas dos cabeçalhos "Carro" e "Moto" nesta página
+      x_carro = None
+      x_moto = None
+      for i in range(len(ocr_data["text"])):
+        txt = ocr_data["text"][i].strip().lower()
+        if "carr" in txt and ocr_data["top"][i] < 250:
+          x_carro = ocr_data["left"][i]
+        elif "moto" in txt and ocr_data["top"][i] < 250:
+          x_moto = ocr_data["left"][i]
+
+      # Agrupa palavras pela coordenada Y (altura da linha)
+      words_list = []
+      for i in range(len(ocr_data["text"])):
+        txt = ocr_data["text"][i].strip()
+        if txt:
+          words_list.append({
+              "text": txt,
+              "x0": ocr_data["left"][i],
+              "top": ocr_data["top"][i],
+          })
+
+      words_list.sort(key=lambda w: w["top"])
+      linhas_agrupadas = []
+      linha_atual = []
+      top_atual = None
+
+      for w in words_list:
+        if top_atual is None:
+          top_atual = w["top"]
+          linha_atual.append(w)
+        elif abs(w["top"] - top_atual) <= 14:
+          linha_atual.append(w)
+        else:
+          linhas_agrupadas.append(linha_atual)
+          linha_atual = [w]
+          top_atual = w["top"]
+      if linha_atual:
+        linhas_agrupadas.append(linha_atual)
+
+      for line_words in linhas_agrupadas:
+        line_words.sort(key=lambda w: w["x0"])
+        texto = " ".join([w["text"] for w in line_words])
+
+        # Normaliza caracteres que o OCR confunde (ex: 'Ο' grego por 'O', '20' por '2Q')
+        texto_norm = texto.replace("Ο", "O").replace("ο", "o")
+
+        if "Regional" in texto_norm and "Tipologia" in texto_norm:
           continue
 
-        # Descobre o limite direito da página para localizar as colunas finais (Carro e Moto)
-        max_x = max(w["x0"] for w in words)
+        # 1. Bloco / Torre
+        torre_match = re.search(
+            r"(TORRE\s*[A-Z0-9]+|BLOCO\s*[A-Z0-9]+)", texto_norm, re.IGNORECASE
+        )
+        if not torre_match:
+          continue
+        torre_val = torre_match.group(1).strip()
 
-        lines_dict = {}
-        for w in words:
-          top_rounded = round(w["top"] / 6) * 6
-          lines_dict.setdefault(top_rounded, []).append(w)
+        # 2. Empreendimento (limpa "Campinas Campinas" antes do nome em maiúsculas)
+        emp_bruto = texto_norm[: torre_match.start()].strip(" -")
+        maiusculas = re.search(
+            r"([A-ZÀ-Ú]{2,}(?:\s+[A-ZÀ-Ú0-9]{2,})+)", emp_bruto
+        )
+        emp_val = maiusculas.group(1).strip() if maiusculas else emp_bruto
 
-        for top_key in sorted(lines_dict.keys()):
-          line_words = sorted(lines_dict[top_key], key=lambda x: x["x0"])
-          texto = " ".join([w["text"] for w in line_words]).strip()
+        # 3. Apto / Unidade
+        apto_match = re.search(
+            r"(?:APTO|UNIDADE|APT)\s*[:\.-]?\s*([A-Z0-9]+)",
+            texto_norm,
+            re.IGNORECASE,
+        )
+        apto_val = apto_match.group(1).strip() if apto_match else "-"
 
-          if "Regional" in texto and "Tipologia" in texto:
-            continue
-
-          debug_linhas.append(texto)
-
-          torre_match = re.search(
-              r"(TORRE\s*[A-Z0-9]+|BLOCO\s*[A-Z0-9]+)", texto, re.IGNORECASE
-          )
-          torre_val = torre_match.group(1).strip() if torre_match else "-"
-
-          # Empreendimento: limpa "Campinas Campinas" ou qualquer prefixo em minúsculas antes do nome em MAIÚSCULAS
-          if torre_match:
-            emp_bruto = texto[: torre_match.start()].strip()
-            emp_bruto = re.sub(r"[-\s]+$", "", emp_bruto)
-            # Pega apenas o trecho em letras maiúsculas do empreendimento (ex: "PORTAL DOS BURITIS")
-            maiusculas = re.search(r"([A-ZÀ-Ú]{2,}(?:\s+[A-ZÀ-Ú0-9]{2,})+)", emp_bruto)
-            emp_val = maiusculas.group(1).strip() if maiusculas else emp_bruto
+        # 4. Tipologia (corrige "20" lido pelo OCR no lugar de "2Q" e trata "2QR")
+        tipo_val = "2 Q"
+        tipo_match = re.search(
+            r"-\s*(\d\s*(?:Q\s*S|Q\s*R|Q|0|DORM))\s*-",
+            texto_norm,
+            re.IGNORECASE,
+        )
+        if tipo_match:
+          t_raw = tipo_match.group(1).upper().replace(" ", "")
+          if t_raw in ["20", "2Q", "2QR"]:
+            tipo_val = "2 Q"
+          elif t_raw == "2QS":
+            tipo_val = "2 Q S"
+          elif t_raw in ["10", "1Q"]:
+            tipo_val = "1 Q"
+          elif t_raw in ["30", "3Q"]:
+            tipo_val = "3 Q"
           else:
-            emp_val = "-"
+            tipo_val = tipo_match.group(1).strip()
 
-          apto_match = re.search(
-              r"(?:APTO|UNIDADE|APT)\s*[:\.-]?\s*([A-Z0-9]+)",
-              texto,
-              re.IGNORECASE,
-          )
-          apto_val = apto_match.group(1).strip() if apto_match else "-"
+        # 5. Área Interna (39,78 / 36,66 / 41,34 / 43,76 - aceita ponto ou vírgula)
+        area_val = "0"
+        for a in re.findall(r"\b(\d{2,3}[\.,]\d{2})\b", texto_norm):
+          val_f = float(a.replace(",", "."))
+          if 15.0 <= val_f <= 400.0:
+            area_val = a.replace(".", ",")
+            break
 
-          tipo_match = re.search(
-              r"\b(\d\s*Q(?:\s*S)?|\d\s*DORM(?:\s*S)?)\b", texto, re.IGNORECASE
-          )
-          tipo_val = tipo_match.group(1).strip() if tipo_match else "-"
+        # 6. Valores Imóvel e Avaliação (números inteiros > 30.000, ex: 269981 e 292900)
+        texto_sem_versao = re.sub(r"\b\d+\.\d+\.\d+\.\d+\b", "", texto_norm)
+        valores_grandes = []
+        for num_str in re.findall(r"\b\d{5,7}\b", texto_sem_versao):
+          if int(num_str) > 30000:
+            valores_grandes.append(num_str)
 
-          if torre_val == "-" and apto_val == "-" and tipo_val == "-":
-            continue
+        valor_imovel = valores_grandes[0] if len(valores_grandes) > 0 else "0"
+        valor_aval = (
+            valores_grandes[1] if len(valores_grandes) > 1 else valor_imovel
+        )
 
-          # Área Interna: procura o primeiro decimal entre 15 e 400 (incluindo térreos com áreas maiores ou diferentes)
-          area_val = "0"
-          areas = re.findall(r"\b(\d{2,3}[\.,]\d{1,2})\b", texto)
-          for a in areas:
-            val_f = float(a.replace(",", "."))
-            if 15.0 <= val_f <= 400.0:
-              area_val = a
-              break
-
-          # Valores Imóvel e Avaliação
-          texto_sem_versao = re.sub(r"\b\d+\.\d+\.\d+\.\d+\b", "", texto)
-          valores_grandes = []
-          for num_str in re.findall(r"\b\d[\d\.,]{4,}\b", texto_sem_versao):
-            num_limpo = converter_numero_br(num_str)
-            if num_limpo > 30000:
-              valores_grandes.append(num_str)
-
-          valor_imovel = valores_grandes[0] if len(valores_grandes) > 0 else "0"
-          valor_aval = (
-              valores_grandes[1] if len(valores_grandes) > 1 else valor_imovel
-          )
-
-          # Vagas Carro e Moto: analisa as palavras nos últimos 12% da largura da página
-          v_carro, v_moto = "0", "0"
-          palavras_direita = [
-              w for w in line_words if w["x0"] >= (max_x * 0.88) and w["text"].isdigit()
+        # 7. Vagas Carro e Moto pela posição horizontal X exata das duas últimas colunas
+        v_carro, v_moto = "0", "0"
+        if x_carro is not None and x_moto is not None:
+          for w in line_words:
+            if w["text"].isdigit():
+              if abs(w["x0"] - x_carro) < 60:
+                v_carro = w["text"]
+              elif abs(w["x0"] - x_moto) < 60:
+                v_moto = w["text"]
+        else:
+          # Fallback: últimas palavras numéricas nos 12% finais da largura da imagem
+          palavras_dir = [
+              w
+              for w in line_words
+              if w["x0"] >= (width * 0.88) and w["text"].isdigit()
           ]
-          if len(palavras_direita) >= 2:
-            # A penúltima coluna numérica da direita é Carro, a última é Moto
-            v_carro = palavras_direita[-2]["text"]
-            v_moto = palavras_direita[-1]["text"]
-          elif len(palavras_direita) == 1:
-            # Se só houver 1 número na extrema direita, verifica se está na coluna final (Moto) ou anterior (Carro)
-            if palavras_direita[0]["x0"] >= (max_x * 0.95):
-              v_moto = palavras_direita[0]["text"]
+          if len(palavras_dir) >= 2:
+            v_carro = palavras_dir[-2]["text"]
+            v_moto = palavras_dir[-1]["text"]
+          elif len(palavras_dir) == 1:
+            if palavras_dir[0]["x0"] >= (width * 0.94):
+              v_moto = palavras_dir[0]["text"]
             else:
-              v_carro = palavras_direita[0]["text"]
+              v_carro = palavras_dir[0]["text"]
 
-          dados_estruturados.append([
-              emp_val,
-              torre_val,
-              apto_val,
-              tipo_val,
-              area_val,
-              valor_imovel,
-              valor_aval,
-              v_carro,
-              v_moto,
-          ])
+        dados_estruturados.append([
+            emp_val,
+            torre_val,
+            apto_val,
+            tipo_val,
+            area_val,
+            valor_imovel,
+            valor_aval,
+            v_carro,
+            v_moto,
+        ])
   except Exception as e:
-    st.warning(f"Aviso na leitura direta: {e}")
+    st.error(f"Erro ao processar PDF: {e}")
 
-  df_res = pd.DataFrame(
+  return pd.DataFrame(
       dados_estruturados,
       columns=[
           "Empreendimento",
@@ -304,7 +322,6 @@ def extrair_tabelas_pdf(file_bytes):
           "Moto",
       ],
   )
-  return df_res, "\n".join(debug_linhas[:15])
 
 
 uploaded_file = st.file_uploader(
@@ -313,23 +330,17 @@ uploaded_file = st.file_uploader(
 
 if uploaded_file is not None:
   file_bytes = uploaded_file.read()
-  debug_texto = ""
 
   if uploaded_file.name.endswith(".pdf"):
-    df, debug_texto = extrair_tabelas_pdf(file_bytes)
+    with st.spinner("Lendo tabelas do PDF..."):
+      df = extrair_tabelas_pdf(file_bytes)
   else:
     df = pd.read_excel(io.BytesIO(file_bytes))
     df.columns = [str(c).strip().replace("\n", " ") for c in df.columns]
 
   if df.empty:
     st.error("Não foi possível extrair dados do arquivo enviado.")
-    if debug_texto:
-      with st.expander("🔍 Ver texto bruto lido do arquivo"):
-        st.text(debug_texto)
   else:
-    with st.expander("🔍 Raio-X das linhas lidas do PDF (Diagnóstico)"):
-      st.text(debug_texto)
-
     st.subheader("📋 Dados Brutos Identificados no Arquivo")
     st.write(f"Total de registros encontrados: **{len(df)} linhas**")
     st.dataframe(df.head(15), use_container_width=True)
@@ -464,46 +475,11 @@ if uploaded_file is not None:
             else pd.Series([0] * len(df_proc_source))
         )
 
-        res_emp, res_bloco, res_apto, res_tipo_orig = [], [], [], []
-
-        for idx in range(len(df_proc_source)):
-          raw_e = str(s_emp.iloc[idx]).strip()
-          raw_b = str(s_bloco.iloc[idx]).strip()
-          raw_a = str(s_apto.iloc[idx]).strip()
-          raw_t = str(s_tipo.iloc[idx]).strip()
-
-          if ("TORRE" in raw_b.upper() or "BLOCO" in raw_b.upper()) and (
-              "APTO" in raw_b.upper() or "Q" in raw_b.upper()
-          ):
-            ext_b, ext_a, ext_t = parse_concatenated_string(raw_b)
-            final_b = ext_b if ext_b else raw_b
-            final_a = (
-                raw_a
-                if raw_a
-                not in ["-", "nan", "None", "", "(Nenhuma / Não existe)"]
-                else ext_a
-            )
-            final_t = (
-                raw_t
-                if raw_t
-                not in ["-", "nan", "None", "", "(Nenhuma / Não existe)"]
-                else ext_t
-            )
-          else:
-            final_b = raw_b if raw_b not in ["nan", "None", ""] else "-"
-            final_a = raw_a if raw_a not in ["nan", "None", ""] else "-"
-            final_t = raw_t if raw_t not in ["nan", "None", ""] else "-"
-
-          res_emp.append(limpar_texto(raw_e))
-          res_bloco.append(limpar_texto(final_b))
-          res_apto.append(limpar_texto(final_a))
-          res_tipo_orig.append(limpar_texto(final_t))
-
         df_proc = pd.DataFrame({
-            "Empreendimento": res_emp,
-            "Bloco": res_bloco,
-            "Apto": res_apto,
-            "Tipologia_Orig": res_tipo_orig,
+            "Empreendimento": [limpar_texto(v) for v in s_emp],
+            "Bloco": [limpar_texto(v) for v in s_bloco],
+            "Apto": [limpar_texto(v) for v in s_apto],
+            "Tipologia_Orig": [limpar_texto(v) for v in s_tipo],
             "Área": [converter_numero_br(v) for v in s_area],
             "Valor_Imovel": [converter_numero_br(v) for v in s_valor],
             "Valor_Avaliacao": [converter_numero_br(v) for v in s_aval],
