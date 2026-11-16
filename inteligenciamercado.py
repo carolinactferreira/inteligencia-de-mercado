@@ -185,52 +185,56 @@ def extrair_tabelas_pdf(file_bytes):
   try:
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
       for page in pdf.pages:
-        txt = page.extract_text(layout=True)
-        if txt:
-          for line in txt.split("\n"):
-            if line.strip():
-              todas_linhas.append(line.strip())
-  except Exception:
-    pass
+        words = page.extract_words()
+        if words:
+          lines_dict = {}
+          for w in words:
+            top_rounded = round(w["top"] / 6) * 6
+            lines_dict.setdefault(top_rounded, []).append(w)
+          for top_key in sorted(lines_dict.keys()):
+            line_words = sorted(lines_dict[top_key], key=lambda x: x["x0"])
+            text_line = " ".join([w["text"] for w in line_words])
+            if len(text_line.strip()) > 10:
+              todas_linhas.append(text_line.strip())
+  except Exception as e:
+    st.warning(f"Aviso na leitura direta do PDF: {e}")
 
-  # Só aciona OCR se o PDF for realmente uma imagem escaneada sem texto nenhum
+  # Só aciona OCR se o PDF não tiver camada de texto
   if not todas_linhas:
     try:
       images = convert_from_bytes(file_bytes, dpi=200)
       for img in images:
         texto_ocr = pytesseract.image_to_string(img, lang="por", config="--psm 6")
         for line in texto_ocr.split("\n"):
-          if line.strip():
+          if len(line.strip()) > 10:
             todas_linhas.append(line.strip())
     except Exception as e:
       st.error(f"Erro no OCR: {e}")
-      return pd.DataFrame()
+      return pd.DataFrame(), ""
 
   if not todas_linhas:
-    return pd.DataFrame()
+    return pd.DataFrame(), ""
 
   dados_estruturados = []
   for texto in todas_linhas:
-    # Ignora linhas de cabeçalho que não contêm unidades
-    if not re.search(r"\b(?:APTO|UNIDADE|APT)\s*[:\.-]?\s*[A-Z0-9]+", texto, re.IGNORECASE):
+    # Ignora explicitamente apenas a linha de títulos da tabela
+    if "Regional" in texto and "Tipologia" in texto:
       continue
 
-    # 1. Empreendimento (pega o texto entre Regional/Cidade e "- TORRE" ou "- BLOCO")
-    emp_match = re.search(
-        r"(?:^[A-Za-zÀ-ÿ]+\s+[A-Za-zÀ-ÿ]+\s+)?(.*?)\s*-\s*(?:TORRE|BLOCO)",
-        texto,
-        re.IGNORECASE,
-    )
-    if emp_match:
-      emp_val = emp_match.group(1).strip()
-      # Remove eventual repetição de cidade no início (ex: "Campinas Campinas ")
-      emp_val = re.sub(r"^(?:[A-Za-zÀ-ÿ]+\s+){1,2}(?=[A-Z]{2,}\s+[A-Z]{2,})", "", emp_val).strip()
-    else:
-      emp_val = "-"
-
-    # 2. Bloco / Torre
+    # 1. Bloco / Torre
     torre_match = re.search(r"(TORRE\s*[A-Z0-9]+|BLOCO\s*[A-Z0-9]+)", texto, re.IGNORECASE)
     torre_val = torre_match.group(1).strip() if torre_match else "-"
+
+    # 2. Empreendimento (antes de TORRE ou BLOCO)
+    if torre_match:
+      emp_bruto = texto[:torre_match.start()].strip()
+      emp_bruto = re.sub(r"[-\s]+$", "", emp_bruto)
+      # Remove prefixos repetidos de cidade (ex: "Campinas Campinas ")
+      emp_val = re.sub(r"^(?:[A-Za-zÀ-ÿ]+\s+){1,2}(?=[A-Z]{2,}\s+[A-Z]{2,})", "", emp_bruto).strip()
+      if not emp_val:
+        emp_val = emp_bruto
+    else:
+      emp_val = "-"
 
     # 3. Apto / Unidade
     apto_match = re.search(r"(?:APTO|UNIDADE|APT)\s*[:\.-]?\s*([A-Z0-9]+)", texto, re.IGNORECASE)
@@ -240,7 +244,11 @@ def extrair_tabelas_pdf(file_bytes):
     tipo_match = re.search(r"\b(\d\s*Q(?:\s*S)?|\d\s*DORM(?:\s*S)?)\b", texto, re.IGNORECASE)
     tipo_val = tipo_match.group(1).strip() if tipo_match else "-"
 
-    # 5. Área Interna (primeiro decimal com 2 dígitos antes da vírgula entre 15 e 400, ex: 39,78)
+    # Só processa como unidade válida se tiver Torre, Apto ou Tipologia identificados
+    if torre_val == "-" and apto_val == "-" and tipo_val == "-":
+      continue
+
+    # 5. Área Interna (primeiro decimal entre 15 e 400, ex: 39,78)
     areas = re.findall(r"\b(\d{2,3}[\.,]\d{2})\b", texto)
     area_val = "0"
     for a in areas:
@@ -249,18 +257,18 @@ def extrair_tabelas_pdf(file_bytes):
         area_val = a
         break
 
-    # 6. Valores Imóvel e Avaliação (números inteiros grandes de 5 a 7 dígitos, ex: 269981 e 292900, ou formatados com ponto/vírgula)
+    # 6. Valores Imóvel e Avaliação (números > 30.000, ex: 269981 e 292900)
     texto_sem_versao = re.sub(r"\b\d+\.\d+\.\d+\.\d+\b", "", texto)
     valores_grandes = []
     for num_str in re.findall(r"\b\d[\d\.,]{4,}\b", texto_sem_versao):
       num_limpo = converter_numero_br(num_str)
-      if num_limpo > 30000:  # Filtra valores reais de imóveis (ignora bônus de 7500 e aptos)
+      if num_limpo > 30000:
         valores_grandes.append(num_str)
 
     valor_imovel = valores_grandes[0] if len(valores_grandes) > 0 else "0"
     valor_aval = valores_grandes[1] if len(valores_grandes) > 1 else valor_imovel
 
-    # 7. Vagas Carro e Moto (os dois últimos números após a versão ex: 4.0.13.0 2 0 1)
+    # 7. Vagas Carro e Moto (após versão ex: 4.0.13.0 2 0 1)
     v_carro, v_moto = "", ""
     vagas_match = re.search(r"\d+\.\d+\.\d+\.\d+\s+\d+\s+(\d+)\s+(\d+)\s*$", texto)
     if vagas_match:
@@ -279,7 +287,8 @@ def extrair_tabelas_pdf(file_bytes):
         v_moto,
     ])
 
-  return pd.DataFrame(
+  amostra_debug = "\n".join(todas_linhas[:15])
+  df_res = pd.DataFrame(
       dados_estruturados,
       columns=[
           "Empreendimento",
@@ -293,6 +302,7 @@ def extrair_tabelas_pdf(file_bytes):
           "Moto",
       ],
   )
+  return df_res, amostra_debug
 
 
 uploaded_file = st.file_uploader(
@@ -301,16 +311,23 @@ uploaded_file = st.file_uploader(
 
 if uploaded_file is not None:
   file_bytes = uploaded_file.read()
+  debug_texto = ""
 
   if uploaded_file.name.endswith(".pdf"):
-    df = extrair_tabelas_pdf(file_bytes)
+    df, debug_texto = extrair_tabelas_pdf(file_bytes)
   else:
     df = pd.read_excel(io.BytesIO(file_bytes))
     df.columns = [str(c).strip().replace("\n", " ") for c in df.columns]
 
   if df.empty:
     st.error("Não foi possível extrair dados do arquivo enviado.")
+    if debug_texto:
+      with st.expander("🔍 Ver texto bruto lido do arquivo"):
+        st.text(debug_texto)
   else:
+    with st.expander("🔍 Raio-X das linhas lidas do PDF (Diagnóstico)"):
+      st.text(debug_texto)
+
     st.subheader("📋 Dados Brutos Identificados no Arquivo")
     st.write(f"Total de registros encontrados: **{len(df)} linhas**")
     st.dataframe(df.head(15), use_container_width=True)
