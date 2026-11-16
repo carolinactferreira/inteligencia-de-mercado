@@ -156,7 +156,6 @@ def extrair_tabelas_pdf(file_bytes):
           img, lang="por", config="--psm 6", output_type=pytesseract.Output.DICT
       )
 
-      # Agrupa palavras pela coordenada Y (tolerância justa de 10px para não misturar linhas vizinhas)
       words_list = []
       for i in range(len(ocr_data["text"])):
         txt = ocr_data["text"][i].strip()
@@ -165,9 +164,29 @@ def extrair_tabelas_pdf(file_bytes):
               "text": txt,
               "x0": ocr_data["left"][i],
               "x1": ocr_data["left"][i] + ocr_data["width"][i],
+              "xc": ocr_data["left"][i] + (ocr_data["width"][i] / 2.0),
               "top": ocr_data["top"][i],
           })
 
+      # Detecta a coordenada X central das colunas "Vagas Carro" e "Vagas Moto" no cabeçalho da página
+      x_carro_header = None
+      x_moto_header = None
+      for w in words_list:
+        if w["top"] < 260 and w["x0"] > (width * 0.80):
+          t_low = w["text"].lower()
+          if "carr" in t_low:
+            x_carro_header = w["xc"]
+          elif "moto" in t_low:
+            x_moto_header = w["xc"]
+
+      # Fallback proporcional exato caso o OCR não leia o título do cabeçalho na página
+      if x_carro_header is None:
+        x_carro_header = width * 0.925
+      if x_moto_header is None:
+        x_moto_header = width * 0.968
+      limite_meio_vagas = (x_carro_header + x_moto_header) / 2.0
+
+      # Agrupa palavras pela coordenada Y
       words_list.sort(key=lambda w: w["top"])
       linhas_agrupadas = []
       linha_atual = []
@@ -246,7 +265,7 @@ def extrair_tabelas_pdf(file_bytes):
         elif "2QS" in texto_norm.replace(" ", "").upper():
           tipo_val = "2 Q S"
 
-        # 5. Área Interna (39,78 / 36,66 / 40,6 / 41,34 / 43,76 / 44,51)
+        # 5. Área Interna
         area_val = "0"
         for a in re.findall(r"\b(\d{2,3}[\.,]\d{1,2})\b", texto_norm):
           val_f = float(a.replace(",", "."))
@@ -266,7 +285,7 @@ def extrair_tabelas_pdf(file_bytes):
             valores_grandes[1] if len(valores_grandes) > 1 else valor_imovel
         )
 
-        # 7. Vagas Carro e Moto: analisa tudo que está à direita do FIM da palavra de versão (ex: 11.0.0.0)
+        # 7. Vagas Carro e Moto pela proximidade horizontal (xc) com cada coluna do cabeçalho
         v_carro, v_moto = "0", "0"
         fim_versao_x = 0
         for w in line_words:
@@ -274,12 +293,10 @@ def extrair_tabelas_pdf(file_bytes):
             fim_versao_x = w["x1"]
             break
 
-        # Se a versão não foi detectada na linha, usa 84% da largura da página como corte da direita
-        corte_x = fim_versao_x if fim_versao_x > 0 else (width * 0.84)
+        corte_esq_carro = max(fim_versao_x + 15, x_carro_header - (width * 0.025))
 
-        digitos_direita = []
         for w in line_words:
-          if w["x0"] >= (corte_x - 2):
+          if w["xc"] >= corte_esq_carro:
             txt_limpo = (
                 w["text"]
                 .replace("。", "0")
@@ -289,25 +306,10 @@ def extrair_tabelas_pdf(file_bytes):
                 .replace("l", "1")
             )
             if txt_limpo in ["0", "1", "2"]:
-              digitos_direita.append((w["x0"], txt_limpo))
-
-        # Na direita da versão existem até 3 colunas: [Oportunidades, Vagas Carro, Vagas Moto]
-        if len(digitos_direita) >= 3:
-          v_carro = digitos_direita[-2][1]
-          v_moto = digitos_direita[-1][1]
-        elif len(digitos_direita) == 2:
-          # Se vieram 2 dígitos (ex: Oportunidades=0 e Carro=1, ou Carro=1 e Moto=0),
-          # verifica se o último está na extrema direita (Moto >= 95% da largura)
-          if digitos_direita[-1][0] >= (width * 0.95):
-            v_carro = digitos_direita[-2][1]
-            v_moto = digitos_direita[-1][1]
-          else:
-            v_carro = digitos_direita[-1][1]
-        elif len(digitos_direita) == 1:
-          if digitos_direita[0][0] >= (width * 0.95):
-            v_moto = digitos_direita[0][1]
-          elif digitos_direita[0][0] >= (width * 0.90):
-            v_carro = digitos_direita[0][1]
+              if w["xc"] < limite_meio_vagas:
+                v_carro = txt_limpo
+              else:
+                v_moto = txt_limpo
 
         dados_estruturados.append([
             emp_val,
