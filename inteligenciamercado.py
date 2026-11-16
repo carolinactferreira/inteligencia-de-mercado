@@ -117,23 +117,6 @@ def auto_detect_columns(df):
       mapping["carro"] = col
     elif "moto" in c_lower and not mapping["moto"]:
       mapping["moto"] = col
-
-  sample_rows = df.head(10)
-  for col in df.columns:
-    vals = [str(v).strip() for v in sample_rows[col].dropna()]
-    if not mapping["bloco"] and any("TORRE" in v.upper() or "BLOCO" in v.upper() for v in vals) and any("APTO" in v.upper() for v in vals):
-      mapping["bloco"] = col
-    if not mapping["area"]:
-      numeric_vals = []
-      for v in vals:
-        try:
-          vf = float(v.replace(",", "."))
-          if 10.0 <= vf <= 400.0:
-            numeric_vals.append(vf)
-        except:
-          pass
-      if len(numeric_vals) >= len(vals) * 0.4 and len(vals) > 0:
-        mapping["area"] = col
   return mapping
 
 def get_area_series(df, sel_area):
@@ -162,8 +145,6 @@ def extrair_tabelas_pdf(file_bytes):
         if words:
           lines_dict = {}
           for w in words:
-            # --- CORREÇÃO DE DESALINHAMENTO VERTICAL ---
-            # Tolerância aumentada para 15 pixels para resgatar valores impressos mais abaixo/acima
             top_rounded = round(w["top"] / 15) * 15
             lines_dict.setdefault(top_rounded, []).append(w)
           for top_key in sorted(lines_dict.keys()):
@@ -174,14 +155,15 @@ def extrair_tabelas_pdf(file_bytes):
   except Exception:
     pass
 
-  # --- DIAGNÓSTICO INTELIGENTE ---
+  # --- DIAGNÓSTICO INTELIGENTE (VERSÃO EXTREMA) ---
   if todas_linhas:
-      texto_completo = " ".join(todas_linhas).replace(".", "").replace(",", "")
-      # Se não encontrar nenhum número grande (> 10.000) no texto todo, descarta a leitura e força OCR
-      if not re.search(r"\d{5,}", texto_completo):
-          todas_linhas = []
+      # Conta quantas linhas têm a marca inconfundível de um preço/área (R$ ou final ,00)
+      linhas_com_preco = [l for l in todas_linhas if "R$" in l.upper() or re.search(r",\d{2}\b", l)]
+      # Se não houver pelo menos 5 linhas com preços, o PDF cortou a camada de texto.
+      if len(linhas_com_preco) < 5:
+          todas_linhas = [] # FORÇA O OCR!
 
-  # --- LEITURA POR OCR (SE A ANTERIOR FALHOU OU FICOU CEGA AOS VALORES) ---
+  # --- LEITURA POR OCR OBRIGATÓRIA (SE O DIAGNÓSTICO FALHOU) ---
   if not todas_linhas:
     try:
       images = convert_from_bytes(file_bytes)
@@ -192,7 +174,7 @@ def extrair_tabelas_pdf(file_bytes):
           if linha_limpa and len(linha_limpa) > 10:
               todas_linhas.append(linha_limpa)
     except Exception as e:
-      st.error(f"Erro ao processar imagem digitalizada via OCR: {e}")
+      st.error(f"Erro no OCR (certifique-se que o pytesseract/poppler está instalado): {e}")
       return pd.DataFrame()
 
   if not todas_linhas:
@@ -211,10 +193,10 @@ def extrair_tabelas_pdf(file_bytes):
           emp_val = texto[:torre_match.start()].strip()
           emp_val = re.sub(r"^[^a-zA-Z]+", "", emp_val)
           
-      # --- NOVA EXTRAÇÃO NUMÉRICA CEGA PARA FORMATOS ---
       texto_limpo = texto.replace("R$ ", "").replace("RS ", "").replace("R$", "").strip()
-      # Captura qualquer bloco de números, independentemente de ter pontos ou não
-      todos_numeros = re.findall(r"\b\d+[\d\.\,]*\b", texto_limpo)
+      
+      # Captura os números todos da linha
+      todos_numeros = re.findall(r"\b\d+(?:[\.\,]\d+)*\b", texto_limpo)
       
       valores_monetarios = []
       area_val = "0"
@@ -237,11 +219,10 @@ def extrair_tabelas_pdf(file_bytes):
               
           try:
               valor_numerico = float(limpo)
-              # Maior que 10 mil é preço do imóvel. Ignora anos (ex: 2026) e apartamentos (ex: 1005)
               if valor_numerico > 10000:
                   valores_monetarios.append(num_str)
-              # Entre 15 e 400 é área.
-              elif 15 <= valor_numerico <= 400:
+              # Só aceita como área se tiver entre 15 e 400 E não for exatamente igual ao número do apartamento
+              elif 15 <= valor_numerico <= 400 and str(int(valor_numerico)) != apto_val:
                   area_val = num_str
           except:
               pass
@@ -378,7 +359,7 @@ if uploaded_file is not None:
         })
         df_proc["Tipologia_Clean"] = df_proc["Tipologia_Orig"].apply(mapear_tipologia)
 
-        # --- FILTRO ANTILIXO (RIGOROSO) ---
+        # --- FILTRO ANTILIXO ---
         def contem_numero(texto):
             return any(char.isdigit() for char in str(texto))
 
