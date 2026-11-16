@@ -183,27 +183,16 @@ def get_area_series(df, sel_area):
 def extrair_tabelas_pdf(file_bytes):
   dados_estruturados = []
   debug_linhas = []
-  x_carro = None
-  x_moto = None
-  x_area = None
 
   try:
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
-      for page_idx, page in enumerate(pdf.pages):
+      for page in pdf.pages:
         words = page.extract_words()
         if not words:
           continue
 
-        # Deteta coordenadas X das colunas na primeira página
-        if page_idx == 0:
-          for w in words:
-            txt_w = w["text"].lower()
-            if "carr" in txt_w:
-              x_carro = w["x0"]
-            elif "moto" in txt_w:
-              x_moto = w["x0"]
-            elif ("intern" in txt_w or "priv" in txt_w) and x_area is None:
-              x_area = w["x0"]
+        # Descobre o limite direito da página para localizar as colunas finais (Carro e Moto)
+        max_x = max(w["x0"] for w in words)
 
         lines_dict = {}
         for w in words:
@@ -224,16 +213,13 @@ def extrair_tabelas_pdf(file_bytes):
           )
           torre_val = torre_match.group(1).strip() if torre_match else "-"
 
+          # Empreendimento: limpa "Campinas Campinas" ou qualquer prefixo em minúsculas antes do nome em MAIÚSCULAS
           if torre_match:
             emp_bruto = texto[: torre_match.start()].strip()
             emp_bruto = re.sub(r"[-\s]+$", "", emp_bruto)
-            emp_val = re.sub(
-                r"^(?:[A-Za-zÀ-ÿ]+\s+){1,2}(?=[A-Z]{2,}\s+[A-Z]{2,})",
-                "",
-                emp_bruto,
-            ).strip()
-            if not emp_val:
-              emp_val = emp_bruto
+            # Pega apenas o trecho em letras maiúsculas do empreendimento (ex: "PORTAL DOS BURITIS")
+            maiusculas = re.search(r"([A-ZÀ-Ú]{2,}(?:\s+[A-ZÀ-Ú0-9]{2,})+)", emp_bruto)
+            emp_val = maiusculas.group(1).strip() if maiusculas else emp_bruto
           else:
             emp_val = "-"
 
@@ -252,23 +238,14 @@ def extrair_tabelas_pdf(file_bytes):
           if torre_val == "-" and apto_val == "-" and tipo_val == "-":
             continue
 
-          # Área Interna: tenta pela coordenada X primeiro, depois por regex decimal
+          # Área Interna: procura o primeiro decimal entre 15 e 400 (incluindo térreos com áreas maiores ou diferentes)
           area_val = "0"
-          if x_area is not None:
-            for w in line_words:
-              if abs(w["x0"] - x_area) < 35:
-                val_f = converter_numero_br(w["text"])
-                if 15.0 <= val_f <= 400.0:
-                  area_val = w["text"]
-                  break
-
-          if area_val == "0":
-            areas = re.findall(r"\b(\d{2,3}[\.,]\d{1,2})\b", texto)
-            for a in areas:
-              val_f = float(a.replace(",", "."))
-              if 15.0 <= val_f <= 400.0:
-                area_val = a
-                break
+          areas = re.findall(r"\b(\d{2,3}[\.,]\d{1,2})\b", texto)
+          for a in areas:
+            val_f = float(a.replace(",", "."))
+            if 15.0 <= val_f <= 400.0:
+              area_val = a
+              break
 
           # Valores Imóvel e Avaliação
           texto_sem_versao = re.sub(r"\b\d+\.\d+\.\d+\.\d+\b", "", texto)
@@ -283,31 +260,21 @@ def extrair_tabelas_pdf(file_bytes):
               valores_grandes[1] if len(valores_grandes) > 1 else valor_imovel
           )
 
-          # Vagas Carro e Moto por coordenada X
+          # Vagas Carro e Moto: analisa as palavras nos últimos 12% da largura da página
           v_carro, v_moto = "0", "0"
-          if x_carro is not None and x_moto is not None:
-            for w in line_words:
-              if w["text"].isdigit():
-                if abs(w["x0"] - x_carro) < 30:
-                  v_carro = w["text"]
-                elif abs(w["x0"] - x_moto) < 30:
-                  v_moto = w["text"]
-          else:
-            # Fallback pelos últimos números após a versão
-            pos_versao = re.search(r"\b\d+\.\d+\.\d+\.\d+\b", texto)
-            if pos_versao:
-              cauda = texto[pos_versao.end() :].strip()
-              nums_cauda = re.findall(r"\b\d+\b", cauda)
-              if len(nums_cauda) >= 3:
-                v_carro = nums_cauda[1]
-                v_moto = nums_cauda[2]
-              elif len(nums_cauda) == 2:
-                # Verifica a posição X da última palavra da linha
-                ultima_palavra = line_words[-1]
-                if ultima_palavra["x0"] > 740:
-                  v_moto = nums_cauda[1]
-                else:
-                  v_carro = nums_cauda[1]
+          palavras_direita = [
+              w for w in line_words if w["x0"] >= (max_x * 0.88) and w["text"].isdigit()
+          ]
+          if len(palavras_direita) >= 2:
+            # A penúltima coluna numérica da direita é Carro, a última é Moto
+            v_carro = palavras_direita[-2]["text"]
+            v_moto = palavras_direita[-1]["text"]
+          elif len(palavras_direita) == 1:
+            # Se só houver 1 número na extrema direita, verifica se está na coluna final (Moto) ou anterior (Carro)
+            if palavras_direita[0]["x0"] >= (max_x * 0.95):
+              v_moto = palavras_direita[0]["text"]
+            else:
+              v_carro = palavras_direita[0]["text"]
 
           dados_estruturados.append([
               emp_val,
@@ -322,69 +289,6 @@ def extrair_tabelas_pdf(file_bytes):
           ])
   except Exception as e:
     st.warning(f"Aviso na leitura direta: {e}")
-
-  # Fallback OCR caso o PDF seja digitalizado sem texto
-  if not dados_estruturados:
-    try:
-      images = convert_from_bytes(file_bytes, dpi=200)
-      for img in images:
-        texto_ocr = pytesseract.image_to_string(img, lang="por", config="--psm 6")
-        for line in texto_ocr.split("\n"):
-          line = line.strip()
-          if len(line) < 15:
-            continue
-          debug_linhas.append(line)
-          torre_match = re.search(
-              r"(TORRE\s*[A-Z0-9]+|BLOCO\s*[A-Z0-9]+)", line, re.IGNORECASE
-          )
-          apto_match = re.search(
-              r"(?:APTO|UNIDADE|APT)\s*[:\.-]?\s*([A-Z0-9]+)",
-              line,
-              re.IGNORECASE,
-          )
-          tipo_match = re.search(
-              r"\b(\d\s*Q(?:\s*S)?|\d\s*DORM(?:\s*S)?)\b", line, re.IGNORECASE
-          )
-          if not (torre_match or apto_match or tipo_match):
-            continue
-
-          torre_val = torre_match.group(1).strip() if torre_match else "-"
-          apto_val = apto_match.group(1).strip() if apto_match else "-"
-          tipo_val = tipo_match.group(1).strip() if tipo_match else "-"
-          emp_val = (
-              line[: torre_match.start()].strip(" -") if torre_match else "-"
-          )
-
-          areas = re.findall(r"\b(\d{2,3}[\.,]\d{1,2})\b", line)
-          area_val = next(
-              (a for a in areas if 15.0 <= float(a.replace(",", ".")) <= 400.0),
-              "0",
-          )
-
-          texto_sem_versao = re.sub(r"\b\d+\.\d+\.\d+\.\d+\b", "", line)
-          valores_grandes = [
-              n
-              for n in re.findall(r"\b\d[\d\.,]{4,}\b", texto_sem_versao)
-              if converter_numero_br(n) > 30000
-          ]
-          valor_imovel = valores_grandes[0] if valores_grandes else "0"
-          valor_aval = (
-              valores_grandes[1] if len(valores_grandes) > 1 else valor_imovel
-          )
-
-          dados_estruturados.append([
-              emp_val,
-              torre_val,
-              apto_val,
-              tipo_val,
-              area_val,
-              valor_imovel,
-              valor_aval,
-              "0",
-              "0",
-          ])
-    except Exception as e:
-      st.error(f"Erro no OCR: {e}")
 
   df_res = pd.DataFrame(
       dados_estruturados,
