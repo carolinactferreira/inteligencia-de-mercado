@@ -168,7 +168,7 @@ def extrair_tabelas_pdf(file_bytes):
               "top": ocr_data["top"][i],
           })
 
-      # Detecta a coordenada X central das colunas "Vagas Carro" e "Vagas Moto" no cabeçalho da página
+      # Detecta a coordenada X central das colunas "Vagas Carro" e "Vagas Moto" no cabeçalho
       x_carro_header = None
       x_moto_header = None
       for w in words_list:
@@ -179,7 +179,6 @@ def extrair_tabelas_pdf(file_bytes):
           elif "moto" in t_low:
             x_moto_header = w["xc"]
 
-      # Fallback proporcional exato caso o OCR não leia o título do cabeçalho na página
       if x_carro_header is None:
         x_carro_header = width * 0.925
       if x_moto_header is None:
@@ -265,11 +264,12 @@ def extrair_tabelas_pdf(file_bytes):
         elif "2QS" in texto_norm.replace(" ", "").upper():
           tipo_val = "2 Q S"
 
-        # 5. Área Interna
+        # 5. Área Interna (ignora versão 11.0.0.0 / 110.00 e aceita apenas metragens reais entre 20 e 95 m²)
+        texto_limpo_area = re.sub(r"\b11[\.,]?0[\.,]?0[\.,]?0\b", "", texto_norm)
         area_val = "0"
-        for a in re.findall(r"\b(\d{2,3}[\.,]\d{1,2})\b", texto_norm):
+        for a in re.findall(r"\b(\d{2}[\.,]\d{1,2})\b", texto_limpo_area):
           val_f = float(a.replace(",", "."))
-          if 15.0 <= val_f <= 400.0:
+          if 20.0 <= val_f <= 95.0:
             area_val = a.replace(".", ",")
             break
 
@@ -285,7 +285,7 @@ def extrair_tabelas_pdf(file_bytes):
             valores_grandes[1] if len(valores_grandes) > 1 else valor_imovel
         )
 
-        # 7. Vagas Carro e Moto pela proximidade horizontal (xc) com cada coluna do cabeçalho
+        # 7. Vagas Carro e Moto: captura todos os dígitos após a versão da tabela (11.0.0.0)
         v_carro, v_moto = "0", "0"
         fim_versao_x = 0
         for w in line_words:
@@ -293,10 +293,11 @@ def extrair_tabelas_pdf(file_bytes):
             fim_versao_x = w["x1"]
             break
 
-        corte_esq_carro = max(fim_versao_x + 15, x_carro_header - (width * 0.025))
+        corte_esq_carro = fim_versao_x + 2 if fim_versao_x > 0 else (width * 0.86)
 
+        digitos_finais = []
         for w in line_words:
-          if w["xc"] >= corte_esq_carro:
+          if w["x0"] >= corte_esq_carro:
             txt_limpo = (
                 w["text"]
                 .replace("。", "0")
@@ -306,10 +307,23 @@ def extrair_tabelas_pdf(file_bytes):
                 .replace("l", "1")
             )
             if txt_limpo in ["0", "1", "2"]:
-              if w["xc"] < limite_meio_vagas:
-                v_carro = txt_limpo
-              else:
-                v_moto = txt_limpo
+              digitos_finais.append((w["xc"], txt_limpo))
+
+        # As 3 colunas após a versão são [Oportunidades, Vagas Carro, Vagas Moto]
+        if len(digitos_finais) >= 3:
+          v_carro = digitos_finais[-2][1]
+          v_moto = digitos_finais[-1][1]
+        elif len(digitos_finais) == 2:
+          if digitos_finais[-1][0] >= limite_meio_vagas:
+            v_carro = digitos_finais[-2][1]
+            v_moto = digitos_finais[-1][1]
+          else:
+            v_carro = digitos_finais[-1][1]
+        elif len(digitos_finais) == 1:
+          if digitos_finais[0][0] >= limite_meio_vagas:
+            v_moto = digitos_finais[0][1]
+          else:
+            v_carro = digitos_finais[0][1]
 
         dados_estruturados.append([
             emp_val,
