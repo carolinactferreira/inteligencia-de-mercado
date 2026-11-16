@@ -148,13 +148,43 @@ def extrair_tabelas_pdf(file_bytes):
   dados_estruturados = []
 
   try:
-    images = convert_from_bytes(file_bytes, dpi=250)
+    images = convert_from_bytes(file_bytes, dpi=300)
 
     for img in images:
-      width, _ = img.size
+      width, height = img.size
+
+      # 1. Leitura da página inteira
       ocr_data = pytesseract.image_to_data(
           img, lang="por", config="--psm 6", output_type=pytesseract.Output.DICT
       )
+
+      # 2. Recorte ampliado 2x exclusivo dos últimos 16% da largura (colunas Oportunidades | Vagas Carro | Vagas Moto)
+      crop_x0 = int(width * 0.84)
+      img_vagas = img.crop((crop_x0, 0, width, height))
+      img_vagas_zoom = img_vagas.resize(
+          (img_vagas.width * 2, img_vagas.height * 2)
+      )
+      ocr_vagas = pytesseract.image_to_data(
+          img_vagas_zoom,
+          lang="eng",
+          config="--psm 6 -c tessedit_char_whitelist=0123456789.Oo",
+          output_type=pytesseract.Output.DICT,
+      )
+
+      digitos_vagas_zoom = []
+      for i in range(len(ocr_vagas["text"])):
+        txt = (
+            ocr_vagas["text"][i]
+            .strip()
+            .replace("O", "0")
+            .replace("o", "0")
+        )
+        if txt in ["0", "1", "2"]:
+          real_x = crop_x0 + (
+              (ocr_vagas["left"][i] + ocr_vagas["width"][i] / 2.0) / 2.0
+          )
+          real_top = ocr_vagas["top"][i] / 2.0
+          digitos_vagas_zoom.append({"x": real_x, "top": real_top, "val": txt})
 
       words_list = []
       for i in range(len(ocr_data["text"])):
@@ -163,29 +193,10 @@ def extrair_tabelas_pdf(file_bytes):
           words_list.append({
               "text": txt,
               "x0": ocr_data["left"][i],
-              "x1": ocr_data["left"][i] + ocr_data["width"][i],
               "xc": ocr_data["left"][i] + (ocr_data["width"][i] / 2.0),
               "top": ocr_data["top"][i],
           })
 
-      # Detecta a coordenada X central das colunas "Vagas Carro" e "Vagas Moto" no cabeçalho
-      x_carro_header = None
-      x_moto_header = None
-      for w in words_list:
-        if w["top"] < 260 and w["x0"] > (width * 0.80):
-          t_low = w["text"].lower()
-          if "carr" in t_low:
-            x_carro_header = w["xc"]
-          elif "moto" in t_low:
-            x_moto_header = w["xc"]
-
-      if x_carro_header is None:
-        x_carro_header = width * 0.925
-      if x_moto_header is None:
-        x_moto_header = width * 0.968
-      limite_meio_vagas = (x_carro_header + x_moto_header) / 2.0
-
-      # Agrupa palavras pela coordenada Y
       words_list.sort(key=lambda w: w["top"])
       linhas_agrupadas = []
       linha_atual = []
@@ -195,7 +206,7 @@ def extrair_tabelas_pdf(file_bytes):
         if top_atual is None:
           top_atual = w["top"]
           linha_atual.append(w)
-        elif abs(w["top"] - top_atual) <= 10:
+        elif abs(w["top"] - top_atual) <= 12:
           linha_atual.append(w)
         else:
           linhas_agrupadas.append(linha_atual)
@@ -204,9 +215,23 @@ def extrair_tabelas_pdf(file_bytes):
       if linha_atual:
         linhas_agrupadas.append(linha_atual)
 
+      # Descobre o centro horizontal de Vagas Carro e Vagas Moto no cabeçalho
+      x_carro_header = width * 0.928
+      x_moto_header = width * 0.972
+      for w in words_list:
+        if w["top"] < 320 and w["x0"] > (width * 0.85):
+          t_low = w["text"].lower()
+          if "carr" in t_low:
+            x_carro_header = w["xc"]
+          elif "moto" in t_low:
+            x_moto_header = w["xc"]
+      meio_carro_moto = (x_carro_header + x_moto_header) / 2.0
+      inicio_carro = x_carro_header - (width * 0.022)
+
       for line_words in linhas_agrupadas:
         line_words.sort(key=lambda w: w["x0"])
         texto = " ".join([w["text"] for w in line_words])
+        linha_top_medio = sum(w["top"] for w in line_words) / len(line_words)
 
         texto_norm = (
             texto.replace("Ο", "O")
@@ -242,7 +267,7 @@ def extrair_tabelas_pdf(file_bytes):
         )
         apto_val = apto_match.group(1).strip() if apto_match else "-"
 
-        # 4. Tipologia (2Q, 2QS, 1Q, 3Q)
+        # 4. Tipologia
         tipo_val = "2 Q"
         tipo_match = re.search(
             r"-\s*(\d\s*(?:Q\s*S|Q\s*R|Q|0|DORM))\s*-",
@@ -264,7 +289,7 @@ def extrair_tabelas_pdf(file_bytes):
         elif "2QS" in texto_norm.replace(" ", "").upper():
           tipo_val = "2 Q S"
 
-        # 5. Área Interna (ignora versão 11.0.0.0 / 110.00 e aceita apenas metragens reais entre 20 e 95 m²)
+        # 5. Área Interna (metragens reais entre 20 e 95 m²)
         texto_limpo_area = re.sub(r"\b11[\.,]?0[\.,]?0[\.,]?0\b", "", texto_norm)
         area_val = "0"
         for a in re.findall(r"\b(\d{2}[\.,]\d{1,2})\b", texto_limpo_area):
@@ -285,45 +310,18 @@ def extrair_tabelas_pdf(file_bytes):
             valores_grandes[1] if len(valores_grandes) > 1 else valor_imovel
         )
 
-        # 7. Vagas Carro e Moto: captura todos os dígitos após a versão da tabela (11.0.0.0)
+        # 7. Vagas Carro e Moto lidas do recorte ampliado 2x na mesma altura Y
         v_carro, v_moto = "0", "0"
-        fim_versao_x = 0
-        for w in line_words:
-          if re.search(r"\d+\.\d+\.\d+\.\d+", w["text"]):
-            fim_versao_x = w["x1"]
-            break
-
-        corte_esq_carro = fim_versao_x + 2 if fim_versao_x > 0 else (width * 0.86)
-
-        digitos_finais = []
-        for w in line_words:
-          if w["x0"] >= corte_esq_carro:
-            txt_limpo = (
-                w["text"]
-                .replace("。", "0")
-                .replace("O", "0")
-                .replace("o", "0")
-                .replace("I", "1")
-                .replace("l", "1")
-            )
-            if txt_limpo in ["0", "1", "2"]:
-              digitos_finais.append((w["xc"], txt_limpo))
-
-        # As 3 colunas após a versão são [Oportunidades, Vagas Carro, Vagas Moto]
-        if len(digitos_finais) >= 3:
-          v_carro = digitos_finais[-2][1]
-          v_moto = digitos_finais[-1][1]
-        elif len(digitos_finais) == 2:
-          if digitos_finais[-1][0] >= limite_meio_vagas:
-            v_carro = digitos_finais[-2][1]
-            v_moto = digitos_finais[-1][1]
+        candidatos_vagas = [
+            d
+            for d in digitos_vagas_zoom
+            if abs(d["top"] - linha_top_medio) <= 18 and d["x"] >= inicio_carro
+        ]
+        for d in candidatos_vagas:
+          if d["x"] < meio_carro_moto:
+            v_carro = d["val"]
           else:
-            v_carro = digitos_finais[-1][1]
-        elif len(digitos_finais) == 1:
-          if digitos_finais[0][0] >= limite_meio_vagas:
-            v_moto = digitos_finais[0][1]
-          else:
-            v_carro = digitos_finais[0][1]
+            v_moto = d["val"]
 
         dados_estruturados.append([
             emp_val,
@@ -374,7 +372,35 @@ if uploaded_file is not None:
   else:
     st.subheader("📋 Dados Brutos Identificados no Arquivo")
     st.write(f"Total de registros encontrados: **{len(df)} linhas**")
-    st.dataframe(df.head(15), use_container_width=True)
+
+    col_f1, col_f2 = st.columns(2)
+    with col_f1:
+      filtro_preview_tipo = st.multiselect(
+          "Filtrar prévia por Tipologia:",
+          options=sorted(df["Tipologia"].unique())
+          if "Tipologia" in df.columns
+          else [],
+          default=[],
+      )
+    with col_f2:
+      apenas_com_vaga = st.checkbox(
+          "Mostrar na prévia apenas unidades com vaga (Carro ou Moto)"
+      )
+
+    df_preview = df.copy()
+    if filtro_preview_tipo and "Tipologia" in df_preview.columns:
+      df_preview = df_preview[df_preview["Tipologia"].isin(filtro_preview_tipo)]
+    if (
+        apenas_com_vaga
+        and "Carro" in df_preview.columns
+        and "Moto" in df_preview.columns
+    ):
+      df_preview = df_preview[
+          (df_preview["Carro"].astype(str) != "0")
+          | (df_preview["Moto"].astype(str) != "0")
+      ]
+
+    st.dataframe(df_preview.head(30), use_container_width=True)
 
     st.subheader("⚙️ Mapeamento de Colunas")
     colunas_disponiveis = ["(Nenhuma / Não existe)"] + list(df.columns)
