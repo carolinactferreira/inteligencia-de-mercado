@@ -144,23 +144,100 @@ def get_area_series(df, sel_area):
   return pd.Series([0] * len(df))
 
 
+def detectar_colunas_cabecalho(words_list, width, height):
+  """Detecta dinamicamente as posições horizontais (xc) das colunas a partir do cabeçalho da página."""
+  header_candidates = [w for w in words_list if w["top"] < (height * 0.16)]
+
+  cols_x = {
+      "area": [],
+      "valor": [],
+      "avaliacao": [],
+      "carro": [],
+      "moto": [],
+      "versao": [],
+  }
+
+  for w in header_candidates:
+    t = w["text"].lower()
+    if any(k in t for k in ["área", "area", "interr", "intern", "priv"]):
+      cols_x["area"].append(w["xc"])
+    elif any(k in t for k in ["imóvel", "imovel", "venda", "tabela", "preço"]):
+      cols_x["valor"].append(w["xc"])
+    elif any(k in t for k in ["aval", "avalia"]):
+      cols_x["avaliacao"].append(w["xc"])
+    elif any(k in t for k in ["carr", "auto"]):
+      cols_x["carro"].append(w["xc"])
+    elif "moto" in t:
+      cols_x["moto"].append(w["xc"])
+    elif any(k in t for k in ["vers", "versão"]):
+      cols_x["versao"].append(w["xc"])
+
+  # Pega a primeira ocorrência de "Área" (Área Interna, antes da Área do Garden/Quintal)
+  x_area = min(cols_x["area"]) if cols_x["area"] else None
+  x_carro = max(cols_x["carro"]) if cols_x["carro"] else None
+  x_moto = max(cols_x["moto"]) if cols_x["moto"] else None
+  x_versao = max(cols_x["versao"]) if cols_x["versao"] else None
+
+  return {
+      "x_area": x_area,
+      "x_carro": x_carro,
+      "x_moto": x_moto,
+      "x_versao": x_versao,
+  }
+
+
 def extrair_tabelas_pdf(file_bytes):
   dados_estruturados = []
 
   try:
     images = convert_from_bytes(file_bytes, dpi=300)
+    ultimo_mapa_colunas = None
 
     for img in images:
       width, height = img.size
 
-      # 1. Leitura da página inteira
+      # 1. Leitura OCR da página inteira
       ocr_data = pytesseract.image_to_data(
           img, lang="por", config="--psm 6", output_type=pytesseract.Output.DICT
       )
 
-      # 2. Recorte ampliado 2x exclusivo dos últimos 16% da largura (colunas Oportunidades | Vagas Carro | Vagas Moto)
-      crop_x0 = int(width * 0.84)
-      img_vagas = img.crop((crop_x0, 0, width, height))
+      words_list = []
+      for i in range(len(ocr_data["text"])):
+        txt = ocr_data["text"][i].strip()
+        if txt:
+          words_list.append({
+              "text": txt,
+              "x0": ocr_data["left"][i],
+              "x1": ocr_data["left"][i] + ocr_data["width"][i],
+              "xc": ocr_data["left"][i] + (ocr_data["width"][i] / 2.0),
+              "top": ocr_data["top"][i],
+          })
+
+      # 2. Mapeia dinamicamente o cabeçalho desta página (ou herda da página 1 se não houver cabeçalho repetido)
+      mapa_atual = detectar_colunas_cabecalho(words_list, width, height)
+      if mapa_atual["x_carro"] or mapa_atual["x_moto"]:
+        ultimo_mapa_colunas = mapa_atual
+      elif ultimo_mapa_colunas is not None:
+        mapa_atual = ultimo_mapa_colunas
+
+      # Define a janela de recorte dinâmico com zoom 2x para as colunas de vagas (independente de onde estejam)
+      vagas_xs = [
+          x
+          for x in [
+              mapa_atual["x_carro"],
+              mapa_atual["x_moto"],
+              mapa_atual["x_versao"],
+          ]
+          if x is not None
+      ]
+      if vagas_xs:
+        crop_x0 = max(0, int(min(vagas_xs) - (width * 0.05)))
+        crop_x1 = min(width, int(max(vagas_xs) + (width * 0.06)))
+      else:
+        crop_x0 = int(width * 0.80)
+        crop_x1 = width
+
+      img_vagas = img.crop((crop_x0, 0, crop_x1, height))
       img_vagas_zoom = img_vagas.resize(
           (img_vagas.width * 2, img_vagas.height * 2)
       )
@@ -186,17 +263,7 @@ def extrair_tabelas_pdf(file_bytes):
           real_top = ocr_vagas["top"][i] / 2.0
           digitos_vagas_zoom.append({"x": real_x, "top": real_top, "val": txt})
 
-      words_list = []
-      for i in range(len(ocr_data["text"])):
-        txt = ocr_data["text"][i].strip()
-        if txt:
-          words_list.append({
-              "text": txt,
-              "x0": ocr_data["left"][i],
-              "xc": ocr_data["left"][i] + (ocr_data["width"][i] / 2.0),
-              "top": ocr_data["top"][i],
-          })
-
+      # Agrupa palavras principais pela coordenada Y
       words_list.sort(key=lambda w: w["top"])
       linhas_agrupadas = []
       linha_atual = []
@@ -206,7 +273,7 @@ def extrair_tabelas_pdf(file_bytes):
         if top_atual is None:
           top_atual = w["top"]
           linha_atual.append(w)
-        elif abs(w["top"] - top_atual) <= 12:
+        elif abs(w["top"] - top_atual) <= 16:
           linha_atual.append(w)
         else:
           linhas_agrupadas.append(linha_atual)
@@ -215,18 +282,21 @@ def extrair_tabelas_pdf(file_bytes):
       if linha_atual:
         linhas_agrupadas.append(linha_atual)
 
-      # Descobre o centro horizontal de Vagas Carro e Vagas Moto no cabeçalho
-      x_carro_header = width * 0.928
-      x_moto_header = width * 0.972
-      for w in words_list:
-        if w["top"] < 320 and w["x0"] > (width * 0.85):
-          t_low = w["text"].lower()
-          if "carr" in t_low:
-            x_carro_header = w["xc"]
-          elif "moto" in t_low:
-            x_moto_header = w["xc"]
-      meio_carro_moto = (x_carro_header + x_moto_header) / 2.0
-      inicio_carro = x_carro_header - (width * 0.022)
+      # Define os centros horizontais de Carro e Moto (dinâmico pelo cabeçalho + fallback relativo à borda direita)
+      max_x_tabela = max((w["xc"] for w in words_list), default=width * 0.98)
+      x_carro_ref = (
+          mapa_atual["x_carro"]
+          if mapa_atual["x_carro"]
+          else (max_x_tabela - width * 0.055)
+      )
+      x_moto_ref = (
+          mapa_atual["x_moto"]
+          if mapa_atual["x_moto"]
+          else (max_x_tabela - width * 0.015)
+      )
+      raio_coluna_vaga = (
+          max(abs(x_moto_ref - x_carro_ref) * 0.55, width * 0.024)
+      )
 
       for line_words in linhas_agrupadas:
         line_words.sort(key=lambda w: w["x0"])
@@ -289,14 +359,33 @@ def extrair_tabelas_pdf(file_bytes):
         elif "2QS" in texto_norm.replace(" ", "").upper():
           tipo_val = "2 Q S"
 
-        # 5. Área Interna (metragens reais entre 20 e 95 m²)
-        texto_limpo_area = re.sub(r"\b11[\.,]?0[\.,]?0[\.,]?0\b", "", texto_norm)
+        # 5. Área Interna: prioriza o número decimal alinhado com a coluna "Área" do cabeçalho
         area_val = "0"
-        for a in re.findall(r"\b(\d{2}[\.,]\d{1,2})\b", texto_limpo_area):
-          val_f = float(a.replace(",", "."))
-          if 20.0 <= val_f <= 95.0:
-            area_val = a.replace(".", ",")
-            break
+        if mapa_atual["x_area"] is not None:
+          candidatos_area = []
+          for w in line_words:
+            if abs(w["xc"] - mapa_atual["x_area"]) <= (width * 0.06):
+              m_area = re.search(r"\b(\d{2,3}[\.,]\d{1,2})\b", w["text"])
+              if m_area:
+                val_f = float(m_area.group(1).replace(",", "."))
+                if 15.0 <= val_f <= 450.0:
+                  candidatos_area.append(
+                      (abs(w["xc"] - mapa_atual["x_area"]), m_area.group(1))
+                  )
+          if candidatos_area:
+            candidatos_area.sort(key=lambda item: item[0])
+            area_val = candidatos_area[0][1].replace(".", ",")
+
+        # Fallback caso o cabeçalho de Área não tenha sido lido
+        if area_val == "0":
+          texto_limpo_area = re.sub(
+              r"\b\d{1,2}[\.,]\d[\.,]\d[\.,]\d\b", "", texto_norm
+          )
+          for a in re.findall(r"\b(\d{2,3}[\.,]\d{1,2})\b", texto_limpo_area):
+            val_f = float(a.replace(",", "."))
+            if 15.0 <= val_f <= 450.0:
+              area_val = a.replace(".", ",")
+              break
 
         # 6. Valores Imóvel e Avaliação
         texto_sem_versao = re.sub(r"\b\d+\.\d+\.\d+\.\d+\b", "", texto_norm)
@@ -310,18 +399,22 @@ def extrair_tabelas_pdf(file_bytes):
             valores_grandes[1] if len(valores_grandes) > 1 else valor_imovel
         )
 
-        # 7. Vagas Carro e Moto lidas do recorte ampliado 2x na mesma altura Y
+        # 7. Vagas Carro e Moto ancoradas dinamicamente nos centros das colunas detectadas no cabeçalho
         v_carro, v_moto = "0", "0"
         candidatos_vagas = [
             d
             for d in digitos_vagas_zoom
-            if abs(d["top"] - linha_top_medio) <= 18 and d["x"] >= inicio_carro
+            if abs(d["top"] - linha_top_medio) <= 22
         ]
         for d in candidatos_vagas:
-          if d["x"] < meio_carro_moto:
-            v_carro = d["val"]
-          else:
-            v_moto = d["val"]
+          dist_carro = abs(d["x"] - x_carro_ref)
+          dist_moto = abs(d["x"] - x_moto_ref)
+          if dist_carro <= raio_coluna_vaga and dist_carro < dist_moto:
+            if d["val"] != "0":
+              v_carro = d["val"]
+          elif dist_moto <= raio_coluna_vaga and dist_moto <= dist_carro:
+            if d["val"] != "0":
+              v_moto = d["val"]
 
         dados_estruturados.append([
             emp_val,
