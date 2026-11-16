@@ -148,7 +148,6 @@ def extrair_tabelas_pdf(file_bytes):
   dados_estruturados = []
 
   try:
-    # Converte o PDF em imagens de alta definição para reconstruir as linhas horizontalmente
     images = convert_from_bytes(file_bytes, dpi=250)
 
     for img in images:
@@ -156,16 +155,6 @@ def extrair_tabelas_pdf(file_bytes):
       ocr_data = pytesseract.image_to_data(
           img, lang="por", config="--psm 6", output_type=pytesseract.Output.DICT
       )
-
-      # Localiza as posições horizontais (X) exatas dos cabeçalhos "Carro" e "Moto" nesta página
-      x_carro = None
-      x_moto = None
-      for i in range(len(ocr_data["text"])):
-        txt = ocr_data["text"][i].strip().lower()
-        if "carr" in txt and ocr_data["top"][i] < 250:
-          x_carro = ocr_data["left"][i]
-        elif "moto" in txt and ocr_data["top"][i] < 250:
-          x_moto = ocr_data["left"][i]
 
       # Agrupa palavras pela coordenada Y (altura da linha)
       words_list = []
@@ -200,8 +189,14 @@ def extrair_tabelas_pdf(file_bytes):
         line_words.sort(key=lambda w: w["x0"])
         texto = " ".join([w["text"] for w in line_words])
 
-        # Normaliza caracteres que o OCR confunde (ex: 'Ο' grego por 'O', '20' por '2Q')
-        texto_norm = texto.replace("Ο", "O").replace("ο", "o")
+        # Normaliza caracteres que o OCR confunde (ex: 'Ο' grego por 'O', 'ΑΡΤΟ' por 'APTO')
+        texto_norm = (
+            texto.replace("Ο", "O")
+            .replace("ο", "o")
+            .replace("Α", "A")
+            .replace("Ρ", "P")
+            .replace("Τ", "T")
+        )
 
         if "Regional" in texto_norm and "Tipologia" in texto_norm:
           continue
@@ -229,7 +224,7 @@ def extrair_tabelas_pdf(file_bytes):
         )
         apto_val = apto_match.group(1).strip() if apto_match else "-"
 
-        # 4. Tipologia (corrige "20" lido pelo OCR no lugar de "2Q" e trata "2QR")
+        # 4. Tipologia (corrige "20" lido pelo OCR no lugar de "2Q" e trata "2QR" e "2QS")
         tipo_val = "2 Q"
         tipo_match = re.search(
             r"-\s*(\d\s*(?:Q\s*S|Q\s*R|Q|0|DORM))\s*-",
@@ -248,16 +243,18 @@ def extrair_tabelas_pdf(file_bytes):
             tipo_val = "3 Q"
           else:
             tipo_val = tipo_match.group(1).strip()
+        elif "2QS" in texto_norm.replace(" ", "").upper():
+          tipo_val = "2 Q S"
 
-        # 5. Área Interna (39,78 / 36,66 / 41,34 / 43,76 - aceita ponto ou vírgula)
+        # 5. Área Interna (39,78 / 36,66 / 40,6 / 41,34 / 43,76 / 44,51)
         area_val = "0"
-        for a in re.findall(r"\b(\d{2,3}[\.,]\d{2})\b", texto_norm):
+        for a in re.findall(r"\b(\d{2,3}[\.,]\d{1,2})\b", texto_norm):
           val_f = float(a.replace(",", "."))
           if 15.0 <= val_f <= 400.0:
             area_val = a.replace(".", ",")
             break
 
-        # 6. Valores Imóvel e Avaliação (números inteiros > 30.000, ex: 269981 e 292900)
+        # 6. Valores Imóvel e Avaliação (números inteiros > 30.000)
         texto_sem_versao = re.sub(r"\b\d+\.\d+\.\d+\.\d+\b", "", texto_norm)
         valores_grandes = []
         for num_str in re.findall(r"\b\d{5,7}\b", texto_sem_versao):
@@ -269,30 +266,36 @@ def extrair_tabelas_pdf(file_bytes):
             valores_grandes[1] if len(valores_grandes) > 1 else valor_imovel
         )
 
-        # 7. Vagas Carro e Moto pela posição horizontal X exata das duas últimas colunas
+        # 7. Vagas Carro e Moto: analisa tudo que aparece fisicamente à direita da coluna "Versão da tabela"
         v_carro, v_moto = "0", "0"
-        if x_carro is not None and x_moto is not None:
+        x_versao = 0
+        for w in line_words:
+          if re.search(r"\d+\.\d+\.\d+\.\d+", w["text"]):
+            x_versao = w["x0"]
+            break
+
+        if x_versao > 0:
+          digitos_vagas = []
           for w in line_words:
-            if w["text"].isdigit():
-              if abs(w["x0"] - x_carro) < 60:
-                v_carro = w["text"]
-              elif abs(w["x0"] - x_moto) < 60:
-                v_moto = w["text"]
-        else:
-          # Fallback: últimas palavras numéricas nos 12% finais da largura da imagem
-          palavras_dir = [
-              w
-              for w in line_words
-              if w["x0"] >= (width * 0.88) and w["text"].isdigit()
-          ]
-          if len(palavras_dir) >= 2:
-            v_carro = palavras_dir[-2]["text"]
-            v_moto = palavras_dir[-1]["text"]
-          elif len(palavras_dir) == 1:
-            if palavras_dir[0]["x0"] >= (width * 0.94):
-              v_moto = palavras_dir[0]["text"]
+            txt_limpo = (
+                w["text"]
+                .replace("。", "0")
+                .replace("O", "0")
+                .replace("o", "0")
+                .replace("I", "1")
+                .replace("l", "1")
+            )
+            if txt_limpo in ["0", "1", "2"] and w["x0"] > (x_versao + 70):
+              digitos_vagas.append((w["x0"], txt_limpo))
+
+          if len(digitos_vagas) >= 2:
+            v_carro = digitos_vagas[-2][1]
+            v_moto = digitos_vagas[-1][1]
+          elif len(digitos_vagas) == 1:
+            if digitos_vagas[0][0] >= (width * 0.94):
+              v_moto = digitos_vagas[0][1]
             else:
-              v_carro = palavras_dir[0]["text"]
+              v_carro = digitos_vagas[0][1]
 
         dados_estruturados.append([
             emp_val,
