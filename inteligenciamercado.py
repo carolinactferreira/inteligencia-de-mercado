@@ -183,46 +183,47 @@ def get_area_series(df, sel_area):
 def extrair_tabelas_pdf(file_bytes):
   dados_estruturados = []
   debug_linhas = []
+  x_carro = None
+  x_moto = None
+  x_area = None
 
   try:
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
-      for page in pdf.pages:
+      for page_idx, page in enumerate(pdf.pages):
         words = page.extract_words()
         if not words:
           continue
 
-        # Descobre a posição X (horizontal) exata dos cabeçalhos "Carro" e "Moto" na página
-        x_carro = None
-        x_moto = None
-        for w in words:
-          txt_w = w["text"].lower()
-          if "carr" in txt_w and w["top"] < 150:
-            x_carro = w["x0"]
-          elif "moto" in txt_w and w["top"] < 150:
-            x_moto = w["x0"]
+        # Deteta coordenadas X das colunas na primeira página
+        if page_idx == 0:
+          for w in words:
+            txt_w = w["text"].lower()
+            if "carr" in txt_w:
+              x_carro = w["x0"]
+            elif "moto" in txt_w:
+              x_moto = w["x0"]
+            elif ("intern" in txt_w or "priv" in txt_w) and x_area is None:
+              x_area = w["x0"]
 
-        # Agrupa palavras por linha
         lines_dict = {}
         for w in words:
-          top_rounded = round(w["top"] / 5) * 5
+          top_rounded = round(w["top"] / 6) * 6
           lines_dict.setdefault(top_rounded, []).append(w)
 
         for top_key in sorted(lines_dict.keys()):
           line_words = sorted(lines_dict[top_key], key=lambda x: x["x0"])
           texto = " ".join([w["text"] for w in line_words]).strip()
 
-          if len(texto) < 15 or ("Regional" in texto and "Tipologia" in texto):
+          if "Regional" in texto and "Tipologia" in texto:
             continue
 
           debug_linhas.append(texto)
 
-          # 1. Bloco / Torre
           torre_match = re.search(
               r"(TORRE\s*[A-Z0-9]+|BLOCO\s*[A-Z0-9]+)", texto, re.IGNORECASE
           )
           torre_val = torre_match.group(1).strip() if torre_match else "-"
 
-          # 2. Empreendimento
           if torre_match:
             emp_bruto = texto[: torre_match.start()].strip()
             emp_bruto = re.sub(r"[-\s]+$", "", emp_bruto)
@@ -236,7 +237,6 @@ def extrair_tabelas_pdf(file_bytes):
           else:
             emp_val = "-"
 
-          # 3. Apto / Unidade
           apto_match = re.search(
               r"(?:APTO|UNIDADE|APT)\s*[:\.-]?\s*([A-Z0-9]+)",
               texto,
@@ -244,7 +244,6 @@ def extrair_tabelas_pdf(file_bytes):
           )
           apto_val = apto_match.group(1).strip() if apto_match else "-"
 
-          # 4. Tipologia
           tipo_match = re.search(
               r"\b(\d\s*Q(?:\s*S)?|\d\s*DORM(?:\s*S)?)\b", texto, re.IGNORECASE
           )
@@ -253,16 +252,25 @@ def extrair_tabelas_pdf(file_bytes):
           if torre_val == "-" and apto_val == "-" and tipo_val == "-":
             continue
 
-          # 5. Área Interna (aceita vírgula, ponto ou espaço caso o PDF quebre ex: "39,78" ou "39.78")
+          # Área Interna: tenta pela coordenada X primeiro, depois por regex decimal
           area_val = "0"
-          areas = re.findall(r"\b(\d{2,3}[\.,]\d{1,2})\b", texto)
-          for a in areas:
-            val_f = float(a.replace(",", "."))
-            if 15.0 <= val_f <= 400.0:
-              area_val = a
-              break
+          if x_area is not None:
+            for w in line_words:
+              if abs(w["x0"] - x_area) < 35:
+                val_f = converter_numero_br(w["text"])
+                if 15.0 <= val_f <= 400.0:
+                  area_val = w["text"]
+                  break
 
-          # 6. Valores Imóvel e Avaliação
+          if area_val == "0":
+            areas = re.findall(r"\b(\d{2,3}[\.,]\d{1,2})\b", texto)
+            for a in areas:
+              val_f = float(a.replace(",", "."))
+              if 15.0 <= val_f <= 400.0:
+                area_val = a
+                break
+
+          # Valores Imóvel e Avaliação
           texto_sem_versao = re.sub(r"\b\d+\.\d+\.\d+\.\d+\b", "", texto)
           valores_grandes = []
           for num_str in re.findall(r"\b\d[\d\.,]{4,}\b", texto_sem_versao):
@@ -275,28 +283,31 @@ def extrair_tabelas_pdf(file_bytes):
               valores_grandes[1] if len(valores_grandes) > 1 else valor_imovel
           )
 
-          # 7. Vagas Carro e Moto por coordenada X exata (ou fallback pelo final da linha)
+          # Vagas Carro e Moto por coordenada X
           v_carro, v_moto = "0", "0"
           if x_carro is not None and x_moto is not None:
             for w in line_words:
               if w["text"].isdigit():
-                if abs(w["x0"] - x_carro) < 25:
+                if abs(w["x0"] - x_carro) < 30:
                   v_carro = w["text"]
-                elif abs(w["x0"] - x_moto) < 25:
+                elif abs(w["x0"] - x_moto) < 30:
                   v_moto = w["text"]
           else:
-            # Fallback: verifica os últimos números após a versão (ex: 4.0.13.0)
+            # Fallback pelos últimos números após a versão
             pos_versao = re.search(r"\b\d+\.\d+\.\d+\.\d+\b", texto)
             if pos_versao:
               cauda = texto[pos_versao.end() :].strip()
               nums_cauda = re.findall(r"\b\d+\b", cauda)
-              # Na cauda vêm: [Oportunidades, Vagas Carro, Vagas Moto]
               if len(nums_cauda) >= 3:
                 v_carro = nums_cauda[1]
                 v_moto = nums_cauda[2]
               elif len(nums_cauda) == 2:
-                # Se só vieram 2 números após oportunidades, verifica qual coluna tem valor
-                v_carro = nums_cauda[1]
+                # Verifica a posição X da última palavra da linha
+                ultima_palavra = line_words[-1]
+                if ultima_palavra["x0"] > 740:
+                  v_moto = nums_cauda[1]
+                else:
+                  v_carro = nums_cauda[1]
 
           dados_estruturados.append([
               emp_val,
@@ -310,7 +321,70 @@ def extrair_tabelas_pdf(file_bytes):
               v_moto,
           ])
   except Exception as e:
-    st.error(f"Erro ao ler PDF: {e}")
+    st.warning(f"Aviso na leitura direta: {e}")
+
+  # Fallback OCR caso o PDF seja digitalizado sem texto
+  if not dados_estruturados:
+    try:
+      images = convert_from_bytes(file_bytes, dpi=200)
+      for img in images:
+        texto_ocr = pytesseract.image_to_string(img, lang="por", config="--psm 6")
+        for line in texto_ocr.split("\n"):
+          line = line.strip()
+          if len(line) < 15:
+            continue
+          debug_linhas.append(line)
+          torre_match = re.search(
+              r"(TORRE\s*[A-Z0-9]+|BLOCO\s*[A-Z0-9]+)", line, re.IGNORECASE
+          )
+          apto_match = re.search(
+              r"(?:APTO|UNIDADE|APT)\s*[:\.-]?\s*([A-Z0-9]+)",
+              line,
+              re.IGNORECASE,
+          )
+          tipo_match = re.search(
+              r"\b(\d\s*Q(?:\s*S)?|\d\s*DORM(?:\s*S)?)\b", line, re.IGNORECASE
+          )
+          if not (torre_match or apto_match or tipo_match):
+            continue
+
+          torre_val = torre_match.group(1).strip() if torre_match else "-"
+          apto_val = apto_match.group(1).strip() if apto_match else "-"
+          tipo_val = tipo_match.group(1).strip() if tipo_match else "-"
+          emp_val = (
+              line[: torre_match.start()].strip(" -") if torre_match else "-"
+          )
+
+          areas = re.findall(r"\b(\d{2,3}[\.,]\d{1,2})\b", line)
+          area_val = next(
+              (a for a in areas if 15.0 <= float(a.replace(",", ".")) <= 400.0),
+              "0",
+          )
+
+          texto_sem_versao = re.sub(r"\b\d+\.\d+\.\d+\.\d+\b", "", line)
+          valores_grandes = [
+              n
+              for n in re.findall(r"\b\d[\d\.,]{4,}\b", texto_sem_versao)
+              if converter_numero_br(n) > 30000
+          ]
+          valor_imovel = valores_grandes[0] if valores_grandes else "0"
+          valor_aval = (
+              valores_grandes[1] if len(valores_grandes) > 1 else valor_imovel
+          )
+
+          dados_estruturados.append([
+              emp_val,
+              torre_val,
+              apto_val,
+              tipo_val,
+              area_val,
+              valor_imovel,
+              valor_aval,
+              "0",
+              "0",
+          ])
+    except Exception as e:
+      st.error(f"Erro no OCR: {e}")
 
   df_res = pd.DataFrame(
       dados_estruturados,
@@ -345,6 +419,9 @@ if uploaded_file is not None:
 
   if df.empty:
     st.error("Não foi possível extrair dados do arquivo enviado.")
+    if debug_texto:
+      with st.expander("🔍 Ver texto bruto lido do arquivo"):
+        st.text(debug_texto)
   else:
     with st.expander("🔍 Raio-X das linhas lidas do PDF (Diagnóstico)"):
       st.text(debug_texto)
