@@ -156,7 +156,7 @@ def extrair_tabelas_pdf(file_bytes):
           img, lang="por", config="--psm 6", output_type=pytesseract.Output.DICT
       )
 
-      # Agrupa palavras pela coordenada Y (altura da linha)
+      # Agrupa palavras pela coordenada Y (tolerância justa de 10px para não misturar linhas vizinhas)
       words_list = []
       for i in range(len(ocr_data["text"])):
         txt = ocr_data["text"][i].strip()
@@ -164,6 +164,7 @@ def extrair_tabelas_pdf(file_bytes):
           words_list.append({
               "text": txt,
               "x0": ocr_data["left"][i],
+              "x1": ocr_data["left"][i] + ocr_data["width"][i],
               "top": ocr_data["top"][i],
           })
 
@@ -176,7 +177,7 @@ def extrair_tabelas_pdf(file_bytes):
         if top_atual is None:
           top_atual = w["top"]
           linha_atual.append(w)
-        elif abs(w["top"] - top_atual) <= 14:
+        elif abs(w["top"] - top_atual) <= 10:
           linha_atual.append(w)
         else:
           linhas_agrupadas.append(linha_atual)
@@ -189,7 +190,6 @@ def extrair_tabelas_pdf(file_bytes):
         line_words.sort(key=lambda w: w["x0"])
         texto = " ".join([w["text"] for w in line_words])
 
-        # Normaliza caracteres que o OCR confunde (ex: 'Ο' grego por 'O', 'ΑΡΤΟ' por 'APTO')
         texto_norm = (
             texto.replace("Ο", "O")
             .replace("ο", "o")
@@ -209,7 +209,7 @@ def extrair_tabelas_pdf(file_bytes):
           continue
         torre_val = torre_match.group(1).strip()
 
-        # 2. Empreendimento (limpa "Campinas Campinas" antes do nome em maiúsculas)
+        # 2. Empreendimento
         emp_bruto = texto_norm[: torre_match.start()].strip(" -")
         maiusculas = re.search(
             r"([A-ZÀ-Ú]{2,}(?:\s+[A-ZÀ-Ú0-9]{2,})+)", emp_bruto
@@ -224,7 +224,7 @@ def extrair_tabelas_pdf(file_bytes):
         )
         apto_val = apto_match.group(1).strip() if apto_match else "-"
 
-        # 4. Tipologia (corrige "20" lido pelo OCR no lugar de "2Q" e trata "2QR" e "2QS")
+        # 4. Tipologia (2Q, 2QS, 1Q, 3Q)
         tipo_val = "2 Q"
         tipo_match = re.search(
             r"-\s*(\d\s*(?:Q\s*S|Q\s*R|Q|0|DORM))\s*-",
@@ -254,7 +254,7 @@ def extrair_tabelas_pdf(file_bytes):
             area_val = a.replace(".", ",")
             break
 
-        # 6. Valores Imóvel e Avaliação (números inteiros > 30.000)
+        # 6. Valores Imóvel e Avaliação
         texto_sem_versao = re.sub(r"\b\d+\.\d+\.\d+\.\d+\b", "", texto_norm)
         valores_grandes = []
         for num_str in re.findall(r"\b\d{5,7}\b", texto_sem_versao):
@@ -266,17 +266,20 @@ def extrair_tabelas_pdf(file_bytes):
             valores_grandes[1] if len(valores_grandes) > 1 else valor_imovel
         )
 
-        # 7. Vagas Carro e Moto: analisa tudo que aparece fisicamente à direita da coluna "Versão da tabela"
+        # 7. Vagas Carro e Moto: analisa tudo que está à direita do FIM da palavra de versão (ex: 11.0.0.0)
         v_carro, v_moto = "0", "0"
-        x_versao = 0
+        fim_versao_x = 0
         for w in line_words:
           if re.search(r"\d+\.\d+\.\d+\.\d+", w["text"]):
-            x_versao = w["x0"]
+            fim_versao_x = w["x1"]
             break
 
-        if x_versao > 0:
-          digitos_vagas = []
-          for w in line_words:
+        # Se a versão não foi detectada na linha, usa 84% da largura da página como corte da direita
+        corte_x = fim_versao_x if fim_versao_x > 0 else (width * 0.84)
+
+        digitos_direita = []
+        for w in line_words:
+          if w["x0"] >= (corte_x - 2):
             txt_limpo = (
                 w["text"]
                 .replace("。", "0")
@@ -285,17 +288,26 @@ def extrair_tabelas_pdf(file_bytes):
                 .replace("I", "1")
                 .replace("l", "1")
             )
-            if txt_limpo in ["0", "1", "2"] and w["x0"] > (x_versao + 70):
-              digitos_vagas.append((w["x0"], txt_limpo))
+            if txt_limpo in ["0", "1", "2"]:
+              digitos_direita.append((w["x0"], txt_limpo))
 
-          if len(digitos_vagas) >= 2:
-            v_carro = digitos_vagas[-2][1]
-            v_moto = digitos_vagas[-1][1]
-          elif len(digitos_vagas) == 1:
-            if digitos_vagas[0][0] >= (width * 0.94):
-              v_moto = digitos_vagas[0][1]
-            else:
-              v_carro = digitos_vagas[0][1]
+        # Na direita da versão existem até 3 colunas: [Oportunidades, Vagas Carro, Vagas Moto]
+        if len(digitos_direita) >= 3:
+          v_carro = digitos_direita[-2][1]
+          v_moto = digitos_direita[-1][1]
+        elif len(digitos_direita) == 2:
+          # Se vieram 2 dígitos (ex: Oportunidades=0 e Carro=1, ou Carro=1 e Moto=0),
+          # verifica se o último está na extrema direita (Moto >= 95% da largura)
+          if digitos_direita[-1][0] >= (width * 0.95):
+            v_carro = digitos_direita[-2][1]
+            v_moto = digitos_direita[-1][1]
+          else:
+            v_carro = digitos_direita[-1][1]
+        elif len(digitos_direita) == 1:
+          if digitos_direita[0][0] >= (width * 0.95):
+            v_moto = digitos_direita[0][1]
+          elif digitos_direita[0][0] >= (width * 0.90):
+            v_carro = digitos_direita[0][1]
 
         dados_estruturados.append([
             emp_val,
